@@ -1,0 +1,45 @@
+# Visual Studio user and cache files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+*.ipch
+
+# Build output directories
+Debug/
+Release/
+x64/
+Win32/
+bin/
+obj/
+
+# C/C++ build artifacts
+*.obj
+*.iobj
+*.pdb
+*.ipdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+*.pch
+*.idb
+*.res
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+
+# Generated browse and IntelliSense files
+*.bsc
+*.sbr
+*.aps
+*.ncb
+*.opendb
+
+# VS Code local settings
+.vscode/
