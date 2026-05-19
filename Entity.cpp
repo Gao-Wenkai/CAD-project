@@ -30,11 +30,15 @@ CEntity::~CEntity() {}
 void CEntity::Draw(CDC*, double, CPoint) {}
 bool CEntity::HitTest(CPoint, double, CPoint) { return false; }
 void CEntity::Move(double, double) {}
+void CEntity::Rotate(CPoint, double) {}
+void CEntity::Scale(CPoint, double) {}
+void CEntity::Mirror(CPoint, CPoint) {}
 CRect CEntity::GetBounds() { return CRect(0,0,0,0); }
 CEntity* CEntity::Clone() const { return nullptr; }
 int CEntity::GetGripCount() { return 0; }
 CPoint CEntity::GetGrip(int) { return CPoint(0,0); }
 void CEntity::SetGrip(int, CPoint) {}
+void CEntity::GetSnapPoints(std::vector<CPoint>&, std::vector<SnapType>&) const {}
 
 void CEntity::Serialize(CArchive& ar)
 {
@@ -106,7 +110,7 @@ void CLineEntity::Draw(CDC* pDC, double scale, CPoint offset)
 
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         CRect rc = GetBounds();
         CRect rcScreen = ToScreenRect(rc, scale, offset);
@@ -166,6 +170,27 @@ void CLineEntity::SetGrip(int index, CPoint pt) {
     if (index == 0) m_ptStart = pt; else m_ptEnd = pt;
 }
 
+void CLineEntity::Rotate(CPoint base, double angle) {
+    m_ptStart = RotatePoint(m_ptStart, base, angle);
+    m_ptEnd = RotatePoint(m_ptEnd, base, angle);
+}
+
+void CLineEntity::Scale(CPoint base, double factor) {
+    m_ptStart = ScalePoint(m_ptStart, base, factor);
+    m_ptEnd = ScalePoint(m_ptEnd, base, factor);
+}
+
+void CLineEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptStart = MirrorPoint(m_ptStart, p1, p2);
+    m_ptEnd = MirrorPoint(m_ptEnd, p1, p2);
+}
+
+void CLineEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptStart); types.push_back(SNAP_ENDPOINT);
+    points.push_back(m_ptEnd);   types.push_back(SNAP_ENDPOINT);
+    points.push_back(MidPoint(m_ptStart, m_ptEnd)); types.push_back(SNAP_MIDPOINT);
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -187,7 +212,7 @@ void CCircleEntity::Draw(CDC* pDC, double scale, CPoint offset)
     pDC->Ellipse(c.x - r, c.y - r, c.x + r, c.y + r);
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         CRect rc = GetBounds();
         CRect rcScreen = ToScreenRect(rc, scale, offset);
@@ -251,6 +276,28 @@ CPoint CCircleEntity::GetGrip(int index) {
 void CCircleEntity::SetGrip(int index, CPoint pt) {
     if (index == 0) { m_ptCenter = pt; }
     else { m_nRadius = (int)Distance(m_ptCenter, pt); }
+}
+
+void CCircleEntity::Rotate(CPoint base, double angle) {
+    m_ptCenter = RotatePoint(m_ptCenter, base, angle);
+}
+
+void CCircleEntity::Scale(CPoint base, double factor) {
+    m_ptCenter = ScalePoint(m_ptCenter, base, factor);
+    m_nRadius = (int)(m_nRadius * fabs(factor) + 0.5);
+    if (m_nRadius < 1) m_nRadius = 1;
+}
+
+void CCircleEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptCenter = MirrorPoint(m_ptCenter, p1, p2);
+}
+
+void CCircleEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptCenter); types.push_back(SNAP_CENTER);
+    points.push_back(CPoint(m_ptCenter.x + m_nRadius, m_ptCenter.y)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x - m_nRadius, m_ptCenter.y)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x, m_ptCenter.y + m_nRadius)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x, m_ptCenter.y - m_nRadius)); types.push_back(SNAP_QUADRANT);
 }
 
 // ===========================================================
@@ -329,7 +376,7 @@ void CArcEntity::Draw(CDC* pDC, double scale, CPoint offset)
     pDC->Arc(rcEllipse, ptStartArc, ptEndArc);
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         pDC->SelectStockObject(NULL_BRUSH);
         pDC->Arc(rcEllipse, ptStartArc, ptEndArc);
@@ -397,6 +444,34 @@ void CArcEntity::SetGrip(int index, CPoint pt) {
     CalcGeometry();
 }
 
+void CArcEntity::Rotate(CPoint base, double angle) {
+    m_ptStart = RotatePoint(m_ptStart, base, angle);
+    m_ptMid = RotatePoint(m_ptMid, base, angle);
+    m_ptEnd = RotatePoint(m_ptEnd, base, angle);
+    CalcGeometry();
+}
+
+void CArcEntity::Scale(CPoint base, double factor) {
+    m_ptStart = ScalePoint(m_ptStart, base, factor);
+    m_ptMid = ScalePoint(m_ptMid, base, factor);
+    m_ptEnd = ScalePoint(m_ptEnd, base, factor);
+    CalcGeometry();
+}
+
+void CArcEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptStart = MirrorPoint(m_ptStart, p1, p2);
+    m_ptMid = MirrorPoint(m_ptMid, p1, p2);
+    m_ptEnd = MirrorPoint(m_ptEnd, p1, p2);
+    CalcGeometry();
+}
+
+void CArcEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptStart);  types.push_back(SNAP_ENDPOINT);
+    points.push_back(m_ptEnd);    types.push_back(SNAP_ENDPOINT);
+    points.push_back(m_ptMid);    types.push_back(SNAP_MIDPOINT);
+    points.push_back(m_ptCenter); types.push_back(SNAP_CENTER);
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -420,7 +495,7 @@ void CRectangleEntity::Draw(CDC* pDC, double scale, CPoint offset)
     pDC->Rectangle(l, t, r, b);
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         pDC->Rectangle(l - 2, t - 2, r + 2, b + 2);
     }
@@ -481,6 +556,33 @@ void CRectangleEntity::SetGrip(int index, CPoint pt) {
     }
 }
 
+void CRectangleEntity::Rotate(CPoint base, double angle) {
+    m_ptCorner1 = RotatePoint(m_ptCorner1, base, angle);
+    m_ptCorner2 = RotatePoint(m_ptCorner2, base, angle);
+}
+
+void CRectangleEntity::Scale(CPoint base, double factor) {
+    m_ptCorner1 = ScalePoint(m_ptCorner1, base, factor);
+    m_ptCorner2 = ScalePoint(m_ptCorner2, base, factor);
+}
+
+void CRectangleEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptCorner1 = MirrorPoint(m_ptCorner1, p1, p2);
+    m_ptCorner2 = MirrorPoint(m_ptCorner2, p1, p2);
+}
+
+void CRectangleEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    CRect rc(m_ptCorner1, m_ptCorner2); rc.NormalizeRect();
+    points.push_back(rc.TopLeft());          types.push_back(SNAP_ENDPOINT);
+    points.push_back(CPoint(rc.right, rc.top)); types.push_back(SNAP_ENDPOINT);
+    points.push_back(rc.BottomRight());      types.push_back(SNAP_ENDPOINT);
+    points.push_back(CPoint(rc.left, rc.bottom)); types.push_back(SNAP_ENDPOINT);
+    points.push_back(MidPoint(rc.TopLeft(), CPoint(rc.right, rc.top)));     types.push_back(SNAP_MIDPOINT);
+    points.push_back(MidPoint(CPoint(rc.right, rc.top), rc.BottomRight())); types.push_back(SNAP_MIDPOINT);
+    points.push_back(MidPoint(rc.BottomRight(), CPoint(rc.left, rc.bottom))); types.push_back(SNAP_MIDPOINT);
+    points.push_back(MidPoint(CPoint(rc.left, rc.bottom), rc.TopLeft()));   types.push_back(SNAP_MIDPOINT);
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -522,7 +624,7 @@ void CPolygonEntity::Draw(CDC* pDC, double scale, CPoint offset)
     }
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         CRect rc = ToScreenRect(GetBounds(), scale, offset);
         rc.InflateRect(4, 4);
@@ -578,6 +680,30 @@ void CPolygonEntity::SetGrip(int index, CPoint pt) {
     else { m_nRadius = (int)Distance(m_ptCenter, pt); }
 }
 
+void CPolygonEntity::Rotate(CPoint base, double angle) {
+    m_ptCenter = RotatePoint(m_ptCenter, base, angle);
+}
+
+void CPolygonEntity::Scale(CPoint base, double factor) {
+    m_ptCenter = ScalePoint(m_ptCenter, base, factor);
+    m_nRadius = (int)(m_nRadius * fabs(factor) + 0.5);
+    if (m_nRadius < 1) m_nRadius = 1;
+}
+
+void CPolygonEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptCenter = MirrorPoint(m_ptCenter, p1, p2);
+}
+
+void CPolygonEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptCenter); types.push_back(SNAP_CENTER);
+    std::vector<CPoint> verts;
+    GetVertices(verts);
+    for (size_t i = 0; i < verts.size(); ++i) {
+        points.push_back(verts[i]); types.push_back(SNAP_ENDPOINT);
+        points.push_back(MidPoint(verts[i], verts[(i+1) % verts.size()])); types.push_back(SNAP_MIDPOINT);
+    }
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -601,7 +727,7 @@ void CEllipseEntity::Draw(CDC* pDC, double scale, CPoint offset)
     pDC->Ellipse(c.x - rx, c.y - ry, c.x + rx, c.y + ry);
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         pDC->Ellipse(c.x - rx - 2, c.y - ry - 2, c.x + rx + 2, c.y + ry + 2);
     }
@@ -662,6 +788,30 @@ void CEllipseEntity::SetGrip(int index, CPoint pt) {
     else if (index == 4) { m_nRadiusY = abs(pt.y - m_ptCenter.y); }
 }
 
+void CEllipseEntity::Rotate(CPoint base, double angle) {
+    m_ptCenter = RotatePoint(m_ptCenter, base, angle);
+}
+
+void CEllipseEntity::Scale(CPoint base, double factor) {
+    m_ptCenter = ScalePoint(m_ptCenter, base, factor);
+    m_nRadiusX = (int)(m_nRadiusX * fabs(factor) + 0.5);
+    m_nRadiusY = (int)(m_nRadiusY * fabs(factor) + 0.5);
+    if (m_nRadiusX < 1) m_nRadiusX = 1;
+    if (m_nRadiusY < 1) m_nRadiusY = 1;
+}
+
+void CEllipseEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptCenter = MirrorPoint(m_ptCenter, p1, p2);
+}
+
+void CEllipseEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptCenter); types.push_back(SNAP_CENTER);
+    points.push_back(CPoint(m_ptCenter.x + m_nRadiusX, m_ptCenter.y)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x - m_nRadiusX, m_ptCenter.y)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x, m_ptCenter.y + m_nRadiusY)); types.push_back(SNAP_QUADRANT);
+    points.push_back(CPoint(m_ptCenter.x, m_ptCenter.y - m_nRadiusY)); types.push_back(SNAP_QUADRANT);
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -688,7 +838,7 @@ void CPolylineEntity::Draw(CDC* pDC, double scale, CPoint offset)
         pDC->LineTo(ToScreen(m_vertices[0], scale, offset));
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
         pDC->SelectObject(&selPen);
         CRect rc = ToScreenRect(GetBounds(), scale, offset);
         rc.InflateRect(4, 4);
@@ -767,6 +917,31 @@ void CPolylineEntity::SetGrip(int index, CPoint pt) {
     m_vertices[index] = pt;
 }
 
+void CPolylineEntity::Rotate(CPoint base, double angle) {
+    for (auto& v : m_vertices) v = RotatePoint(v, base, angle);
+}
+
+void CPolylineEntity::Scale(CPoint base, double factor) {
+    for (auto& v : m_vertices) v = ScalePoint(v, base, factor);
+}
+
+void CPolylineEntity::Mirror(CPoint p1, CPoint p2) {
+    for (auto& v : m_vertices) v = MirrorPoint(v, p1, p2);
+}
+
+void CPolylineEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    int n = (int)m_vertices.size();
+    for (int i = 0; i < n; ++i) {
+        points.push_back(m_vertices[i]); types.push_back(SNAP_ENDPOINT);
+    }
+    for (int i = 0; i < n - 1; ++i) {
+        points.push_back(MidPoint(m_vertices[i], m_vertices[i+1])); types.push_back(SNAP_MIDPOINT);
+    }
+    if (m_bClosed && n > 2) {
+        points.push_back(MidPoint(m_vertices.back(), m_vertices[0])); types.push_back(SNAP_MIDPOINT);
+    }
+}
+
 // ===========================================================
 
 // ===========================================================
@@ -783,20 +958,16 @@ void CTextEntity::Draw(CDC* pDC, double scale, CPoint offset)
     int scaledHeight = (int)(m_nHeight * scale);
     if (scaledHeight < 5) scaledHeight = 5;
 
+    int rotDeg = (int)(m_dRotation * 180.0 / M_PI * 10.0);
     CFont font;
-    font.CreateFont(scaledHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    font.CreateFont(scaledHeight, 0, rotDeg, rotDeg, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     DEFAULT_QUALITY, DEFAULT_PITCH | FF_MODERN, _T("Consolas"));
     CFont* pOldFont = pDC->SelectObject(&font);
     COLORREF oldColor = pDC->SetTextColor(m_color);
     int oldBkMode = pDC->SetBkMode(TRANSPARENT);
 
-    if (m_dRotation != 0) {
-
-        pDC->TextOutW(pos.x, pos.y, m_strText);
-    } else {
-        pDC->TextOutW(pos.x, pos.y, m_strText);
-    }
+    pDC->TextOutW(pos.x, pos.y, m_strText);
 
     pDC->SetBkMode(oldBkMode);
     pDC->SetTextColor(oldColor);
@@ -805,7 +976,7 @@ void CTextEntity::Draw(CDC* pDC, double scale, CPoint offset)
 
     if (m_bSelected) {
         CSize sz = pDC->GetTextExtent(m_strText);
-        CPen selPen(PS_DOT, 1, RGB(255, 0, 127));
+        CPen selPen(PS_DOT, 1, RGB(0, 255, 255));
         CPen* oldPen = pDC->SelectObject(&selPen);
         pDC->MoveTo(pos.x, pos.y + scaledHeight + 2);
         pDC->LineTo(pos.x + sz.cx, pos.y + scaledHeight + 2);
@@ -863,6 +1034,25 @@ CPoint CTextEntity::GetGrip(int index) {
 
 void CTextEntity::SetGrip(int index, CPoint pt) {
     if (index == 0) m_ptPosition = pt;
+}
+
+void CTextEntity::Rotate(CPoint base, double angle) {
+    m_ptPosition = RotatePoint(m_ptPosition, base, angle);
+    m_dRotation += angle;
+}
+
+void CTextEntity::Scale(CPoint base, double factor) {
+    m_ptPosition = ScalePoint(m_ptPosition, base, factor);
+    m_nHeight = (int)(m_nHeight * fabs(factor) + 0.5);
+    if (m_nHeight < 2) m_nHeight = 2;
+}
+
+void CTextEntity::Mirror(CPoint p1, CPoint p2) {
+    m_ptPosition = MirrorPoint(m_ptPosition, p1, p2);
+}
+
+void CTextEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
+    points.push_back(m_ptPosition); types.push_back(SNAP_NEAREST);
 }
 
 // ===========================================================

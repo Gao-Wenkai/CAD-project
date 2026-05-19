@@ -15,6 +15,7 @@ public:
 
     CEdit             m_wndCmdLine;
     CFont             m_fontCmdLine;
+    CBrush            m_cmdLineBrush;
 
 public:
     virtual BOOL PreCreateWindow(CREATESTRUCT& cs);
@@ -28,6 +29,9 @@ public:
 protected:
     afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
     afx_msg void OnSize(UINT nType, int cx, int cy);
+    afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
+    virtual BOOL PreTranslateMessage(MSG* pMsg) override;
+    void ProcessCommandLine();
 
     DECLARE_MESSAGE_MAP()
 };

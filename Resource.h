@@ -3,6 +3,7 @@
 #pragma once
 
 #define IDD_ABOUTBOX                    100
+#define IDD_TEXT_INPUT                  200
 #define IDP_OLE_INIT_FAILED             100
 #define IDR_MAINFRAME                   128
 #define IDR_LargeHWTYPE                 130
@@ -36,6 +37,8 @@
 #define ID_VIEW_SNAP                    1305
 #define ID_VIEW_ORTHO                   1306
 
+#define ID_FORMAT_LAYER                 1501
+
 #define ID_PROP_COLOR                   1401
 #define ID_PROP_LINETYPE                1402
 #define ID_PROP_LINEWEIGHT              1403
@@ -44,6 +47,8 @@
 #define IDC_COMMAND_LINE                2001
 #define IDC_COMMAND_HISTORY             2002
 #define IDC_PROPERTY_PANEL              2101
+#define IDC_TEXT_CONTENT                2003
+#define IDC_TEXT_HEIGHT                 2004
 
 #define ID_COLOR_RED                    4101
 #define ID_COLOR_YELLOW                 4102

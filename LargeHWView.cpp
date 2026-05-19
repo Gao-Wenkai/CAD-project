@@ -18,6 +18,45 @@
 
 IMPLEMENT_DYNCREATE(CLargeHWView, CView)
 
+// Text input dialog
+class CTextInputDlg : public CDialog
+{
+public:
+    CString m_strText;
+    int     m_nHeight;
+
+    CTextInputDlg(CWnd* pParent = nullptr)
+        : CDialog(IDD_TEXT_INPUT, pParent)
+        , m_strText(_T(""))
+        , m_nHeight(20)
+    {}
+
+protected:
+    virtual BOOL OnInitDialog() override
+    {
+        CDialog::OnInitDialog();
+        SetDlgItemText(IDC_TEXT_CONTENT, L"");
+        SetDlgItemInt(IDC_TEXT_HEIGHT, 20, FALSE);
+        GetDlgItem(IDC_TEXT_CONTENT)->SetFocus();
+        return FALSE;
+    }
+
+    virtual void OnOK() override
+    {
+        GetDlgItemText(IDC_TEXT_CONTENT, m_strText);
+        m_nHeight = GetDlgItemInt(IDC_TEXT_HEIGHT, NULL, FALSE);
+        if (m_nHeight < 1) m_nHeight = 20;
+        if (m_strText.IsEmpty())
+            m_strText = L"Text";
+        CDialog::OnOK();
+    }
+
+    DECLARE_MESSAGE_MAP()
+};
+
+BEGIN_MESSAGE_MAP(CTextInputDlg, CDialog)
+END_MESSAGE_MAP()
+
 BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_FILE_PRINT, &CView::OnFilePrint)
     ON_COMMAND(ID_FILE_PRINT_DIRECT, &CView::OnFilePrint)
@@ -27,6 +66,8 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_WM_LBUTTONUP()
     ON_WM_MOUSEMOVE()
     ON_WM_RBUTTONDOWN()
+    ON_WM_MBUTTONDOWN()
+    ON_WM_MBUTTONUP()
     ON_WM_MOUSEWHEEL()
     ON_WM_KEYDOWN()
     ON_WM_SETCURSOR()
@@ -50,9 +91,14 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_MODIFY_MIRROR,   &CLargeHWView::OnModifyMirror)
     ON_COMMAND(ID_MODIFY_OFFSET,   &CLargeHWView::OnModifyOffset)
 
-    ON_COMMAND(ID_CAD_UNDO,       &CLargeHWView::OnEditUndo)
-    ON_COMMAND(ID_CAD_REDO,       &CLargeHWView::OnEditRedo)
+    ON_COMMAND(ID_EDIT_UNDO,       &CLargeHWView::OnEditUndo)
+    ON_COMMAND(ID_EDIT_REDO,       &CLargeHWView::OnEditRedo)
+    ON_COMMAND(ID_CAD_UNDO,        &CLargeHWView::OnEditUndo)
+    ON_COMMAND(ID_CAD_REDO,        &CLargeHWView::OnEditRedo)
     ON_COMMAND(ID_EDIT_SELECTALL,  &CLargeHWView::OnEditSelectAll)
+
+    ON_UPDATE_COMMAND_UI(ID_EDIT_UNDO, &CLargeHWView::OnUpdateEditUndo)
+    ON_UPDATE_COMMAND_UI(ID_EDIT_REDO, &CLargeHWView::OnUpdateEditRedo)
 
     ON_COMMAND(ID_VIEW_ZOOM_EXTENTS,&CLargeHWView::OnViewZoomExtents)
     ON_COMMAND(ID_VIEW_ZOOM_WINDOW, &CLargeHWView::OnViewZoomWindow)
@@ -78,6 +124,8 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_LINEWEIGHT_4,    &CLargeHWView::OnLineweight4)
 
     ON_COMMAND(ID_CONTEXT_CANCEL,  &CLargeHWView::OnCancelCommand)
+    ON_COMMAND(ID_CONTEXT_REPEAT,  &CLargeHWView::OnContextRepeat)
+    ON_COMMAND(ID_FORMAT_LAYER,    &CLargeHWView::OnFormatLayer)
 END_MESSAGE_MAP()
 
 // Constructor/Destructor
@@ -90,6 +138,13 @@ CLargeHWView::CLargeHWView() noexcept
     , m_nPolygonSides(6)
     , m_bArcAltHalf(false)
     , m_bPolylineClose(false)
+    , m_bPanning(false)
+    , m_ptPanStart(0, 0)
+    , m_ptPanOffsetStart(0, 0)
+    , m_ptSnapped(0, 0)
+    , m_bSnapActive(false)
+    , m_nSnapType(SNAP_NONE)
+    , m_nLastCommandID(0)
     , m_currentColor(RGB(0, 255, 209))
     , m_currentLineStyle(PS_SOLID)
     , m_currentLineWidth(1)
@@ -131,11 +186,22 @@ void CLargeHWView::OnDraw(CDC* pDC)
     // Entities
     DrawEntities(pDC);
 
+    static int drawCount = 0;
+    drawCount++;
+    if (drawCount % 30 == 1)
+        TRACE(L"[DEBUG] OnDraw #%d: entCount=%d, state=%d, scale=%.2f, offset=(%d,%d)\n",
+              drawCount, (int)pDoc->GetEntities().size(), (int)pDoc->m_drawState, pDoc->m_dScale,
+              pDoc->m_ptOffset.x, pDoc->m_ptOffset.y);
+
     // Preview (rubber band)
     if (m_bDrawing) DrawPreview(pDC);
 
     // UCS icon
     DrawUCSIcon(pDC);
+
+    // Snap marker
+    if (m_bSnapActive)
+        DrawSnapMarker(pDC);
 
     // Crosshair cursor
     CPoint cursorPt;
@@ -215,8 +281,32 @@ void CLargeHWView::DrawCrosshair(CDC* pDC, CPoint pt)
 void CLargeHWView::DrawEntities(CDC* pDC)
 {
     CLargeHWDoc* pDoc = GetDocument();
-    for (auto* p : pDoc->GetEntities())
-        const_cast<CEntity*>(p)->Draw(pDC, pDoc->m_dScale, pDoc->m_ptOffset);
+    const auto& ents = pDoc->GetEntities();
+    static int entTraceCount = 0;
+    entTraceCount++;
+    if (entTraceCount % 30 == 1)
+        TRACE(L"[DEBUG] DrawEntities #%d: entCount=%d\n", entTraceCount, (int)ents.size());
+    for (size_t i = 0; i < ents.size(); ++i) {
+        CEntity* p = const_cast<CEntity*>(ents[i]);
+        p->Draw(pDC, pDoc->m_dScale, pDoc->m_ptOffset);
+        if (p->m_bSelected) {
+            CRect bounds = p->GetBounds();
+            CRect screenBounds(
+                (int)(bounds.left * pDoc->m_dScale + pDoc->m_ptOffset.x),
+                (int)(bounds.top * pDoc->m_dScale + pDoc->m_ptOffset.y),
+                (int)(bounds.right * pDoc->m_dScale + pDoc->m_ptOffset.x),
+                (int)(bounds.bottom * pDoc->m_dScale + pDoc->m_ptOffset.y)
+            );
+            screenBounds.NormalizeRect();
+            screenBounds.InflateRect(3, 3);
+            CPen hlPen(PS_SOLID, 2, RGB(0, 255, 255));
+            CPen* pOld = pDC->SelectObject(&hlPen);
+            CBrush* pOldBr = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+            pDC->Rectangle(&screenBounds);
+            pDC->SelectObject(pOld);
+            pDC->SelectObject(pOldBr);
+        }
+    }
 }
 
 // ============================================================
@@ -231,7 +321,8 @@ void CLargeHWView::DrawPreview(CDC* pDC)
     CPen* pOldPen = pDC->SelectObject(&previewPen);
     int oldROP = pDC->SetROP2(R2_NOTXORPEN);
 
-    CPoint curWorld = ScreenToWorld(m_ptCurrent);
+    CPoint curWorld = m_bSnapActive ? ScreenToWorld(m_ptSnapped) : ScreenToWorld(m_ptCurrent);
+    CPoint cursorPt = m_bSnapActive ? m_ptSnapped : m_ptCurrent;
 
     switch (pDoc->m_drawState) {
     case STATE_DRAW_LINE_P2:
@@ -239,7 +330,7 @@ void CLargeHWView::DrawPreview(CDC* pDC)
         if (m_tempPts.size() >= 1) {
             CPoint p1 = WorldToScreen(m_tempPts[0]);
             pDC->MoveTo(p1);
-            pDC->LineTo(m_ptCurrent);
+            pDC->LineTo(cursorPt);
         }
         break;
 
@@ -291,7 +382,7 @@ void CLargeHWView::DrawPreview(CDC* pDC)
         if (m_tempPts.size() >= 1) {
             CPoint last = WorldToScreen(m_tempPts.back());
             pDC->MoveTo(last);
-            pDC->LineTo(m_ptCurrent);
+            pDC->LineTo(cursorPt);
         }
         // Closed mode: dashed line from last point back to first
         if (m_bPolylineClose && m_tempPts.size() >= 2) {
@@ -360,13 +451,66 @@ void CLargeHWView::DrawPreview(CDC* pDC)
     case STATE_MOVE_DEST:
     case STATE_COPY_DEST:
         if (m_tempPts.size() >= 1) {
-            CPoint base = WorldToScreen(m_tempPts[0]);
+            CPoint base = WorldToScreen(m_tempPts.back());
+            TRACE(L"[DEBUG] DrawPreview MOVE/COPY_DEST: base=(%d,%d), cursor=(%d,%d), tempPts=%d\n",
+                  base.x, base.y, cursorPt.x, cursorPt.y, (int)m_tempPts.size());
             pDC->MoveTo(base);
-            pDC->LineTo(m_ptCurrent);
+            pDC->LineTo(cursorPt);
         }
         break;
 
     case STATE_WINDOW_SELECT: {
+        CBrush* pB = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+        pDC->Rectangle(m_ptDragStart.x, m_ptDragStart.y, m_ptCurrent.x, m_ptCurrent.y);
+        pDC->SelectObject(pB);
+        break;
+    }
+
+    case STATE_ROTATE_ANGLE:
+        if (m_tempPts.size() >= 1) {
+            CPoint base = WorldToScreen(m_tempPts[0]);
+            pDC->MoveTo(base);
+            pDC->LineTo(cursorPt);
+        }
+        break;
+
+    case STATE_SCALE_FACTOR:
+        if (m_tempPts.size() >= 1) {
+            CPoint base = WorldToScreen(m_tempPts[0]);
+            pDC->MoveTo(base);
+            pDC->LineTo(cursorPt);
+        }
+        break;
+
+    case STATE_MIRROR_P1:
+        // No preview needed - first click sets mirror line start
+        break;
+
+    case STATE_MIRROR_P2:
+        if (m_tempPts.size() >= 1) {
+            CPoint p1 = WorldToScreen(m_tempPts[0]);
+            CPoint cursorPt = m_bSnapActive ? m_ptSnapped : m_ptCurrent;
+            pDC->MoveTo(p1);
+            pDC->LineTo(cursorPt);
+        }
+        break;
+
+    case STATE_ZOOM_WINDOW_P1:
+        if (m_bDragging) {
+            CBrush* pB = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+            pDC->Rectangle(m_ptDragStart.x, m_ptDragStart.y, m_ptCurrent.x, m_ptCurrent.y);
+            pDC->SelectObject(pB);
+        } else {
+            pDC->MoveTo(m_ptDragStart);
+            pDC->LineTo(m_ptCurrent);
+            pDC->MoveTo(m_ptCurrent);
+            pDC->LineTo(m_ptDragStart.x, m_ptCurrent.y);
+            pDC->MoveTo(m_ptCurrent);
+            pDC->LineTo(m_ptCurrent.x, m_ptDragStart.y);
+        }
+        break;
+
+    case STATE_ZOOM_WINDOW_P2: {
         CBrush* pB = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
         pDC->Rectangle(m_ptDragStart.x, m_ptDragStart.y, m_ptCurrent.x, m_ptCurrent.y);
         pDC->SelectObject(pB);
@@ -414,6 +558,37 @@ void CLargeHWView::DrawUCSIcon(CDC* pDC)
 }
 
 // ============================================================
+// Draw snap marker
+// ============================================================
+void CLargeHWView::DrawSnapMarker(CDC* pDC)
+{
+    CPoint scr = m_ptSnapped;
+    COLORREF markerColor;
+    switch (m_nSnapType) {
+    case SNAP_ENDPOINT:  markerColor = RGB(255, 128, 0); break;
+    case SNAP_MIDPOINT:  markerColor = RGB(0, 255, 128); break;
+    case SNAP_CENTER:    markerColor = RGB(255, 255, 0); break;
+    case SNAP_QUADRANT:  markerColor = RGB(0, 255, 255); break;
+    case SNAP_NEAREST:   markerColor = RGB(200, 200, 200); break;
+    default:             markerColor = RGB(128, 255, 0); break;
+    }
+
+    CPen snapPen(PS_SOLID, 2, markerColor);
+    CPen* pOldPen = pDC->SelectObject(&snapPen);
+    CBrush* pOldBrush = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+
+    int sz = 8;
+    pDC->Rectangle(scr.x - sz, scr.y - sz, scr.x + sz, scr.y + sz);
+    pDC->MoveTo(scr.x - sz - 2, scr.y);
+    pDC->LineTo(scr.x + sz + 2, scr.y);
+    pDC->MoveTo(scr.x, scr.y - sz - 2);
+    pDC->LineTo(scr.x, scr.y + sz + 2);
+
+    pDC->SelectObject(pOldPen);
+    pDC->SelectObject(pOldBrush);
+}
+
+// ============================================================
 // Coordinate transforms
 // ============================================================
 CPoint CLargeHWView::WorldToScreen(CPoint world) const
@@ -443,6 +618,57 @@ CPoint CLargeHWView::SnapToGrid(CPoint pt) const
     return CPoint(x, y);
 }
 
+CPoint CLargeHWView::SnapToObjects(CPoint pt)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || !pDoc->m_bObjectSnap) return pt;
+
+    std::vector<CPoint> snapPts;
+    std::vector<SnapType> snapTypes;
+    pDoc->CollectSnapPoints(snapPts, snapTypes);
+
+    double screenPt = 12.0 / pDoc->m_dScale;
+    if (screenPt < 1.0) screenPt = 1.0;
+    double bestDist = screenPt;
+    CPoint bestPt = pt;
+    SnapType bestType = SNAP_NONE;
+
+    for (size_t i = 0; i < snapPts.size(); ++i) {
+        SnapType t = snapTypes[i];
+        if (!pDoc->m_bSnapEndpoint && t == SNAP_ENDPOINT) continue;
+        if (!pDoc->m_bSnapMidpoint && t == SNAP_MIDPOINT) continue;
+        if (!pDoc->m_bSnapCenter && t == SNAP_CENTER) continue;
+        if (!pDoc->m_bSnapQuadrant && t == SNAP_QUADRANT) continue;
+        if (!pDoc->m_bSnapNearest && t == SNAP_NEAREST) continue;
+
+        double d = Distance(pt, snapPts[i]);
+        if (d < bestDist) {
+            bestDist = d;
+            bestPt = snapPts[i];
+            bestType = t;
+        }
+    }
+
+    if (bestType != SNAP_NONE) {
+        m_nSnapType = bestType;
+        return bestPt;
+    }
+
+    return pt;
+}
+
+CPoint CLargeHWView::ApplyOrtho(CPoint pt, CPoint ref) const
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || !pDoc->m_bOrthoMode) return pt;
+    double dx = fabs((double)(pt.x - ref.x));
+    double dy = fabs((double)(pt.y - ref.y));
+    if (dx >= dy)
+        return CPoint(pt.x, ref.y);
+    else
+        return CPoint(ref.x, pt.y);
+}
+
 // ============================================================
 // Update status bar (coordinates + command prompt)
 // ============================================================
@@ -454,12 +680,13 @@ void CLargeHWView::UpdateStatusBar()
 
     CPoint world = ScreenToWorld(m_ptCurrent);
     CString strCoord;
-    strCoord.Format(L"X: %d  Y: %d  | Zoom: %.2f  |  %s  SNAP=%s GRID=%s ORTHO=%s",
+    strCoord.Format(L"X: %d  Y: %d  | Zoom: %.2f  |  %s  SNAP=%s GRID=%s ORTHO=%s OSNAP=%s",
                     world.x, world.y, pDoc->m_dScale,
                     (LPCTSTR)pDoc->m_strCommandPrompt,
                     pDoc->m_bSnapToGrid ? L"ON" : L"OFF",
                     pDoc->m_bShowGrid ? L"ON" : L"OFF",
-                    pDoc->m_bOrthoMode ? L"ON" : L"OFF");
+                    pDoc->m_bOrthoMode ? L"ON" : L"OFF",
+                    pDoc->m_bObjectSnap ? L"ON" : L"OFF");
 
     pFrame->SetStatusBarText(strCoord);
 }
@@ -472,7 +699,12 @@ void CLargeHWView::SetDrawState(CadDrawState state)
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_drawState = state;
     m_bDrawing = (state != STATE_IDLE);
-    pDoc->DeselectAll();
+
+    // Only deselect for drawing commands, not modify/select/view operations
+    if (state >= STATE_DRAW_LINE_P1 && state <= STATE_DRAW_TEXT_POS)
+        pDoc->DeselectAll();
+
+    TRACE(L"[DEBUG] SetDrawState: state=%d, m_bDrawing=%d, tempPts=%d\n", (int)state, m_bDrawing, (int)m_tempPts.size());
 
     switch (state) {
     case STATE_DRAW_LINE_P1:         pDoc->m_strCommandPrompt = L"LINE Specify first point: "; break;
@@ -497,15 +729,38 @@ void CLargeHWView::SetDrawState(CadDrawState state)
     case STATE_COPY_SELECT:          pDoc->m_strCommandPrompt = L"COPY Select objects: "; break;
     case STATE_COPY_BASE:            pDoc->m_strCommandPrompt = L"COPY Specify base point: "; break;
     case STATE_COPY_DEST:            pDoc->m_strCommandPrompt = L"COPY Specify destination: "; break;
+    case STATE_ROTATE_SELECT:        pDoc->m_strCommandPrompt = L"ROTATE Select objects: "; break;
+    case STATE_ROTATE_CENTER:        pDoc->m_strCommandPrompt = L"ROTATE Specify base point: "; break;
+    case STATE_ROTATE_ANGLE:         pDoc->m_strCommandPrompt = L"ROTATE Specify rotation angle or second point: "; break;
+    case STATE_SCALE_SELECT:         pDoc->m_strCommandPrompt = L"SCALE Select objects: "; break;
+    case STATE_SCALE_BASE:           pDoc->m_strCommandPrompt = L"SCALE Specify base point: "; break;
+    case STATE_SCALE_FACTOR:         pDoc->m_strCommandPrompt = L"SCALE Specify scale factor or second point: "; break;
+    case STATE_MIRROR_SELECT:        pDoc->m_strCommandPrompt = L"MIRROR Select objects: "; break;
+    case STATE_MIRROR_P1:            pDoc->m_strCommandPrompt = L"MIRROR Specify first point of mirror line: "; break;
+    case STATE_MIRROR_P2:            pDoc->m_strCommandPrompt = L"MIRROR Specify second point of mirror line: "; break;
+    case STATE_OFFSET_SELECT:        pDoc->m_strCommandPrompt = L"OFFSET Select entity to offset: "; break;
+    case STATE_OFFSET_DIST:          pDoc->m_strCommandPrompt = L"OFFSET Specify offset distance (click point on side): "; break;
+    case STATE_ZOOM_WINDOW_P1:       pDoc->m_strCommandPrompt = L"ZOOM Window: Specify first corner: "; break;
+    case STATE_ZOOM_WINDOW_P2:       pDoc->m_strCommandPrompt = L"ZOOM Window: Specify opposite corner: "; break;
     case STATE_IDLE:
     default:                         pDoc->m_strCommandPrompt = L"Command: "; m_bDrawing = false; break;
     }
+    
+    // Update command line edit (only on state change, not every mouse move)
+    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+    if (pFrame && pFrame->m_wndCmdLine.GetSafeHwnd()) {
+        pFrame->m_wndCmdLine.SetWindowText(pDoc->m_strCommandPrompt);
+        int nLen = pDoc->m_strCommandPrompt.GetLength();
+        pFrame->m_wndCmdLine.SetSel(nLen, nLen);
+    }
+    
     UpdateStatusBar();
     Invalidate(FALSE);
 }
 
 void CLargeHWView::CompleteDrawCommand()
 {
+    TRACE(L"[DEBUG] CompleteDrawCommand called\n");
     m_tempPts.clear();
     SetDrawState(STATE_IDLE);
 }
@@ -519,7 +774,25 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     if (!pDoc) return;
 
     CPoint world = ScreenToWorld(point);
+
+    // Apply snap (grid + object)
+    CPoint worldSnapped = SnapToGrid(world);
+    if (pDoc->m_bObjectSnap) {
+        worldSnapped = SnapToObjects(worldSnapped);
+    }
+
+    // Apply ortho if in a state that requires it
     CadDrawState state = pDoc->m_drawState;
+    TRACE(L"[DEBUG] OnLButtonDown: screen=(%d,%d), world=(%d,%d), state=%d, tempPts=%d, selected=%d\n",
+          point.x, point.y, world.x, world.y, (int)state, (int)m_tempPts.size(), pDoc->GetSelectedCount());
+    if (pDoc->m_bOrthoMode && !m_tempPts.empty() &&
+        (state == STATE_DRAW_LINE_P2 || state == STATE_MOVE_DEST || state == STATE_COPY_DEST ||
+         state == STATE_ROTATE_ANGLE || state == STATE_SCALE_FACTOR || state == STATE_MIRROR_P2 ||
+         state == STATE_OFFSET_DIST || state == STATE_DRAW_RECT_P2)) {
+        worldSnapped = ApplyOrtho(worldSnapped, m_tempPts.back());
+    }
+
+    world = worldSnapped;
 
     // Check grip hit first (only in IDLE state)
     if (state == STATE_IDLE) {
@@ -527,6 +800,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         if (hitEntity && hitEntity->m_bSelected) {
             int gripIdx = hitEntity->HitTestGrip(point, pDoc->m_dScale, pDoc->m_ptOffset);
             if (gripIdx >= 0) {
+                pDoc->RecordGripUndo(hitEntity);
                 m_nGripIndex = gripIdx;
                 m_pGripEntity = hitEntity;
                 m_bDragging = true;
@@ -544,10 +818,20 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pDoc->DeselectAll();
             hit->m_bSelected = true;
         } else {
-            pDoc->DeselectAll();
-            pDoc->m_drawState = STATE_WINDOW_SELECT;
-            m_ptDragStart = point;
-            m_bDragging = true;
+            // Ctrl+click on empty space → zoom window drag
+            if (nFlags & MK_CONTROL) {
+                pDoc->m_drawState = STATE_ZOOM_WINDOW_P1;
+                m_bDrawing = true;
+                m_ptDragStart = point;
+                m_bDragging = true;
+                pDoc->m_strCommandPrompt = L"ZOOM Window: Specify first corner: ";
+                UpdateStatusBar();
+            } else {
+                pDoc->DeselectAll();
+                pDoc->m_drawState = STATE_WINDOW_SELECT;
+                m_ptDragStart = point;
+                m_bDragging = true;
+            }
         }
         Invalidate(FALSE);
         break;
@@ -642,14 +926,18 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         break;
 
     case STATE_DRAW_TEXT_POS: {
-        CTextEntity* pText = new CTextEntity(world, L"CAD Text", 20);
-        pDoc->AddEntity(pText);
+        CTextInputDlg dlg(this);
+        if (dlg.DoModal() == IDOK) {
+            CTextEntity* pText = new CTextEntity(world, dlg.m_strText, dlg.m_nHeight);
+            pDoc->AddEntity(pText);
+        }
         CompleteDrawCommand();
         break;
     }
 
     case STATE_MOVE_SELECT: {
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_MOVE_SELECT: hit=%p, world=(%d,%d)\n", hit, world.x, world.y);
         if (hit) {
             pDoc->DeselectAll();
             hit->m_bSelected = true;
@@ -660,21 +948,29 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     }
 
     case STATE_MOVE_BASE:
+        TRACE(L"[DEBUG] STATE_MOVE_BASE: world=(%d,%d), tempPts=%d\n", world.x, world.y, (int)m_tempPts.size());
         m_tempPts.push_back(world);
         SetDrawState(STATE_MOVE_DEST);
         break;
 
     case STATE_MOVE_DEST: {
+        pDoc->RecordModifyUndo();
         double dx = world.x - m_tempPts[1].x;
         double dy = world.y - m_tempPts[1].y;
+        int nCount = pDoc->GetSelectedCount();
+        TRACE(L"[DEBUG] STATE_MOVE_DEST: world=(%d,%d), base=(%d,%d), dx=%.0f, dy=%.0f, nSel=%d, tempPts=%d\n",
+              world.x, world.y, m_tempPts[1].x, m_tempPts[1].y, dx, dy, nCount, (int)m_tempPts.size());
         pDoc->MoveSelected(dx, dy);
         pDoc->DeselectAll();
         CompleteDrawCommand();
+        pDoc->m_strCommandPrompt.Format(L"Moved %d entities (dx=%d, dy=%d)", nCount, (int)dx, (int)dy);
+        UpdateStatusBar();
         break;
     }
 
     case STATE_COPY_SELECT: {
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_COPY_SELECT: hit=%p, world=(%d,%d)\n", hit, world.x, world.y);
         if (hit) {
             pDoc->DeselectAll();
             hit->m_bSelected = true;
@@ -685,6 +981,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     }
 
     case STATE_COPY_BASE:
+        TRACE(L"[DEBUG] STATE_COPY_BASE: world=(%d,%d), tempPts=%d\n", world.x, world.y, (int)m_tempPts.size());
         m_tempPts.push_back(world);
         SetDrawState(STATE_COPY_DEST);
         break;
@@ -692,14 +989,208 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     case STATE_COPY_DEST: {
         double dx = world.x - m_tempPts[1].x;
         double dy = world.y - m_tempPts[1].y;
+        TRACE(L"[DEBUG] STATE_COPY_DEST: world=(%d,%d), base=(%d,%d), dx=%.0f, dy=%.0f, tempPts=%d\n",
+              world.x, world.y, m_tempPts[1].x, m_tempPts[1].y, dx, dy, (int)m_tempPts.size());
         auto selectedEnts = pDoc->GetSelectedEntities();
+        int nCount = (int)selectedEnts.size();
+        std::vector<int> newIDs;
         for (auto* pEnt : selectedEnts) {
             CEntity* pCopy = pEnt->Clone();
             pCopy->Move(dx, dy);
-            pDoc->AddEntity(pCopy);
+            pDoc->AddEntity(pCopy, false);
+            newIDs.push_back(pCopy->m_nID);
+        }
+        pDoc->RecordCreateUndo(newIDs);
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        pDoc->m_strCommandPrompt.Format(L"Copied %d entities (dx=%d, dy=%d)", nCount, (int)dx, (int)dy);
+        UpdateStatusBar();
+        break;
+    }
+
+    case STATE_ROTATE_SELECT: {
+        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_ROTATE_SELECT: hit=%p\n", hit);
+        if (hit) {
+            pDoc->DeselectAll();
+            hit->m_bSelected = true;
+            SetDrawState(STATE_ROTATE_CENTER);
+        }
+        break;
+    }
+
+    case STATE_ROTATE_CENTER:
+        TRACE(L"[DEBUG] STATE_ROTATE_CENTER: world=(%d,%d)\n", world.x, world.y);
+        m_tempPts.push_back(world);
+        SetDrawState(STATE_ROTATE_ANGLE);
+        break;
+
+    case STATE_ROTATE_ANGLE: {
+        MessageBeep(MB_ICONASTERISK);
+        pDoc->RecordModifyUndo();
+        CPoint base = m_tempPts[0];
+        double angle = atan2((double)(world.y - base.y), (double)(world.x - base.x));
+        int nCount = pDoc->GetSelectedCount();
+        TRACE(L"[DEBUG] STATE_ROTATE_ANGLE: world=(%d,%d), base=(%d,%d), angle=%.3f rad (%.1f deg), nSel=%d\n",
+              world.x, world.y, base.x, base.y, angle, angle * 180.0 / M_PI, nCount);
+        if (nCount == 0) {
+            pDoc->m_strCommandPrompt = L"ROTATE: No entities selected! Select objects first.";
+        } else {
+            pDoc->RotateSelected(base, angle);
+            pDoc->m_strCommandPrompt.Format(L"Rotated %d entities (angle=%.1f deg)", nCount, angle * 180.0 / M_PI);
         }
         pDoc->DeselectAll();
         CompleteDrawCommand();
+        UpdateStatusBar();
+        break;
+    }
+
+    case STATE_SCALE_SELECT: {
+        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_SCALE_SELECT: hit=%p\n", hit);
+        if (hit) {
+            pDoc->DeselectAll();
+            hit->m_bSelected = true;
+            SetDrawState(STATE_SCALE_BASE);
+        }
+        break;
+    }
+
+    case STATE_SCALE_BASE:
+        TRACE(L"[DEBUG] STATE_SCALE_BASE: world=(%d,%d)\n", world.x, world.y);
+        m_tempPts.push_back(world);
+        SetDrawState(STATE_SCALE_FACTOR);
+        break;
+
+    case STATE_SCALE_FACTOR: {
+        MessageBeep(MB_ICONASTERISK);
+        pDoc->RecordModifyUndo();
+        CPoint base = m_tempPts[0];
+        double dist = Distance(base, world);
+        if (dist < 1.0) dist = 1.0;
+        double factor = dist / 100.0;
+        int nCount = pDoc->GetSelectedCount();
+        TRACE(L"[DEBUG] STATE_SCALE_FACTOR: world=(%d,%d), base=(%d,%d), dist=%.0f, factor=%.3f, nSel=%d\n",
+              world.x, world.y, base.x, base.y, dist, factor, nCount);
+        if (nCount == 0) {
+            pDoc->m_strCommandPrompt = L"SCALE: No entities selected!";
+        } else {
+            pDoc->ScaleSelected(base, factor);
+            pDoc->m_strCommandPrompt.Format(L"Scaled %d entities (factor=%.2f)", nCount, factor);
+        }
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        break;
+    }
+
+    case STATE_MIRROR_SELECT: {
+        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_MIRROR_SELECT: hit=%p\n", hit);
+        if (hit) {
+            pDoc->DeselectAll();
+            hit->m_bSelected = true;
+            SetDrawState(STATE_MIRROR_P1);
+        }
+        break;
+    }
+
+    case STATE_MIRROR_P1:
+        TRACE(L"[DEBUG] STATE_MIRROR_P1: world=(%d,%d)\n", world.x, world.y);
+        m_tempPts.push_back(world);
+        SetDrawState(STATE_MIRROR_P2);
+        break;
+
+    case STATE_MIRROR_P2: {
+        CPoint p1 = m_tempPts[0];
+        CPoint p2 = world;
+        double distP1P2 = Distance(p1, p2);
+        int nCount = pDoc->GetSelectedCount();
+        TRACE(L"[DEBUG] STATE_MIRROR_P2: p1=(%d,%d), p2=(%d,%d), dist=%.0f, nSel=%d\n",
+              p1.x, p1.y, p2.x, p2.y, distP1P2, nCount);
+        if (distP1P2 > 0) {
+            pDoc->RecordModifyUndo();
+            if (nCount == 0) {
+                pDoc->m_strCommandPrompt = L"MIRROR: No entities selected!";
+            } else {
+                pDoc->MirrorSelected(p1, p2);
+                pDoc->m_strCommandPrompt.Format(L"Mirrored %d entities", nCount);
+            }
+        } else {
+            pDoc->m_strCommandPrompt = L"Mirror: line too short, cancelled";
+        }
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        break;
+    }
+
+    case STATE_OFFSET_SELECT: {
+        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        TRACE(L"[DEBUG] STATE_OFFSET_SELECT: hit=%p\n", hit);
+        if (hit) {
+            pDoc->DeselectAll();
+            hit->m_bSelected = true;
+            m_tempPts.push_back(world);
+            SetDrawState(STATE_OFFSET_DIST);
+        }
+        break;
+    }
+
+    case STATE_OFFSET_DIST: {
+        CPoint ref = m_tempPts[0];
+        double dx = world.x - ref.x;
+        double dy = world.y - ref.y;
+        TRACE(L"[DEBUG] STATE_OFFSET_DIST: world=(%d,%d), ref=(%d,%d), dx=%.0f, dy=%.0f\n",
+              world.x, world.y, ref.x, ref.y, dx, dy);
+        auto selectedEnts = pDoc->GetSelectedEntities();
+        int nCount = (int)selectedEnts.size();
+        std::vector<int> newIDs;
+        for (auto* pEnt : selectedEnts) {
+            CEntity* pCopy = pEnt->Clone();
+            pCopy->Move(dx, dy);
+            pDoc->AddEntity(pCopy, false);
+            newIDs.push_back(pCopy->m_nID);
+        }
+        pDoc->RecordCreateUndo(newIDs);
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        pDoc->m_strCommandPrompt.Format(L"Offset %d entities (dx=%d, dy=%d)", nCount, (int)dx, (int)dy);
+        UpdateStatusBar();
+        break;
+    }
+
+    case STATE_ZOOM_WINDOW_P1:
+        m_ptDragStart = point;
+        SetDrawState(STATE_ZOOM_WINDOW_P2);
+        break;
+
+    case STATE_ZOOM_WINDOW_P2: {
+        CRect rc(m_ptDragStart, point);
+        rc.NormalizeRect();
+        if (rc.Width() > 5 && rc.Height() > 5) {
+            CPoint topLeft = ScreenToWorld(rc.TopLeft());
+            CPoint bottomRight = ScreenToWorld(rc.BottomRight());
+            CRect rcWorld(topLeft, bottomRight);
+            rcWorld.NormalizeRect();
+            rcWorld.InflateRect(10, 10);
+
+            CRect rcClient;
+            GetClientRect(&rcClient);
+
+            if (rcWorld.Width() > 0 && rcWorld.Height() > 0) {
+                double sx = (double)rcClient.Width() / rcWorld.Width();
+                double sy = (double)rcClient.Height() / rcWorld.Height();
+                pDoc->m_dScale = min(sx, sy);
+                pDoc->m_ptOffset = CPoint(
+                    (int)(-rcWorld.left * pDoc->m_dScale),
+                    (int)(-rcWorld.top * pDoc->m_dScale)
+                );
+            }
+        }
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        Invalidate(FALSE);
         break;
     }
 
@@ -731,6 +1222,40 @@ void CLargeHWView::OnLButtonUp(UINT nFlags, CPoint point)
         }
         pDoc->m_drawState = STATE_IDLE;
         m_bDragging = false;
+        m_bDrawing = false;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+    }
+
+    if (pDoc->m_drawState == STATE_ZOOM_WINDOW_P1 && m_bDragging) {
+        CRect rc(m_ptDragStart, point);
+        rc.NormalizeRect();
+        if (rc.Width() > 5 && rc.Height() > 5) {
+            CPoint topLeft = ScreenToWorld(rc.TopLeft());
+            CPoint bottomRight = ScreenToWorld(rc.BottomRight());
+            CRect rcWorld(topLeft, bottomRight);
+            rcWorld.NormalizeRect();
+            rcWorld.InflateRect(10, 10);
+
+            CRect rcClient;
+            GetClientRect(&rcClient);
+
+            if (rcWorld.Width() > 0 && rcWorld.Height() > 0) {
+                double sx = (double)rcClient.Width() / rcWorld.Width();
+                double sy = (double)rcClient.Height() / rcWorld.Height();
+                pDoc->m_dScale = min(sx, sy);
+                pDoc->m_ptOffset = CPoint(
+                    (int)(-rcWorld.left * pDoc->m_dScale),
+                    (int)(-rcWorld.top * pDoc->m_dScale)
+                );
+                pDoc->m_strCommandPrompt.Format(L"Zoom Window: scale=%.2f", pDoc->m_dScale);
+            }
+        } else {
+            pDoc->m_strCommandPrompt = L"Zoom Window: area too small, cancelled";
+        }
+        pDoc->m_drawState = STATE_IDLE;
+        m_bDragging = false;
+        m_bDrawing = false;
         UpdateStatusBar();
         Invalidate(FALSE);
     }
@@ -755,27 +1280,56 @@ void CLargeHWView::OnMouseMove(UINT nFlags, CPoint point)
 {
     CLargeHWDoc* pDoc = GetDocument();
 
-    if (m_bDragging && m_nGripIndex >= 0 && m_pGripEntity) {
-        CPoint world = ScreenToWorld(point);
-        m_pGripEntity->SetGrip(m_nGripIndex, world);
+    // Pan with middle button
+    if (m_bPanning) {
+        CPoint delta(point.x - m_ptPanStart.x, point.y - m_ptPanStart.y);
+        pDoc->m_ptOffset = CPoint(m_ptPanOffsetStart.x + delta.x, m_ptPanOffsetStart.y + delta.y);
         m_ptCurrent = point;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return;
+    }
+
+    // Always track raw mouse for smooth crosshair
+    m_ptCurrent = point;
+
+    // Compute snapped world point
+    CPoint world = ScreenToWorld(point);
+    world = SnapToGrid(world);
+    CPoint worldBeforeSnap = world;
+    if (pDoc->m_bObjectSnap) {
+        world = SnapToObjects(world);
+    }
+    m_bSnapActive = (worldBeforeSnap.x != world.x || worldBeforeSnap.y != world.y);
+    if (m_bSnapActive) {
+        m_ptSnapped = WorldToScreen(world);
+    }
+
+    // Grip drag with ortho
+    if (m_bDragging && m_nGripIndex >= 0 && m_pGripEntity) {
+        CPoint refGrip = m_pGripEntity->GetGrip(0);
+        world = ApplyOrtho(world, refGrip);
+        m_pGripEntity->SetGrip(m_nGripIndex, world);
         pDoc->SetModified(true);
         UpdateStatusBar();
         Invalidate(FALSE);
         return;
     }
 
-    m_ptCurrent = point;
+    // Apply ortho for drawing/modify commands
+    CadDrawState state = pDoc->m_drawState;
+    if ((state == STATE_DRAW_LINE_P2 || state == STATE_MOVE_DEST || state == STATE_COPY_DEST ||
+         state == STATE_ROTATE_ANGLE || state == STATE_SCALE_FACTOR || state == STATE_MIRROR_P2 ||
+         state == STATE_OFFSET_DIST) && !m_tempPts.empty()) {
+        world = ApplyOrtho(world, m_tempPts.back());
+        m_ptSnapped = WorldToScreen(world);
+        m_bSnapActive = true;
+    }
+
     UpdateStatusBar();
 
-    if (pDoc->m_drawState == STATE_WINDOW_SELECT && m_bDragging) {
-        Invalidate(FALSE);
-        return;
-    }
-
-    if (m_bDrawing) {
-        Invalidate(FALSE);
-    }
+    // Always invalidate to keep crosshair tracking and snap marker live
+    Invalidate(FALSE);
 
     CView::OnMouseMove(nFlags, point);
 }
@@ -814,6 +1368,28 @@ BOOL CLargeHWView::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
     Invalidate(FALSE);
 
     return TRUE;
+}
+
+// ============================================================
+// MButton Down/Up - Pan with middle mouse
+// ============================================================
+void CLargeHWView::OnMButtonDown(UINT nFlags, CPoint point)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    m_bPanning = true;
+    m_ptPanStart = point;
+    m_ptPanOffsetStart = pDoc->m_ptOffset;
+    SetCapture();
+    CView::OnMButtonDown(nFlags, point);
+}
+
+void CLargeHWView::OnMButtonUp(UINT nFlags, CPoint point)
+{
+    m_bPanning = false;
+    ReleaseCapture();
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    CView::OnMButtonUp(nFlags, point);
 }
 
 // ============================================================
@@ -878,13 +1454,21 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case 'Z':
-        if (GetKeyState(VK_CONTROL) & 0x8000)
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
             pDoc->Undo();
+            UpdateStatusBar();
+            Invalidate(FALSE);
+        } else if (pDoc->m_drawState == STATE_IDLE) {
+            OnViewZoomWindow();
+        }
         break;
 
     case 'Y':
-        if (GetKeyState(VK_CONTROL) & 0x8000)
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
             pDoc->Redo();
+            UpdateStatusBar();
+            Invalidate(FALSE);
+        }
         break;
 
     case 'A':
@@ -909,6 +1493,12 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
     case VK_F8:
         pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        break;
+
+    case VK_F3:
+        pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
@@ -962,6 +1552,9 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
     menu.AppendMenu(MF_STRING, ID_CONTEXT_CANCEL, L"Cancel (Esc)");
     menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING, ID_CONTEXT_REPEAT, L"Repeat last command");
+    menu.AppendMenu(MF_SEPARATOR);
+    menu.AppendMenu(MF_STRING, ID_VIEW_ZOOM_WINDOW,  L"Zoom Window");
+    menu.AppendMenu(MF_STRING, ID_VIEW_ZOOM_EXTENTS, L"Zoom Extents");
 
     CLargeHWDoc* pDoc = GetDocument();
     int nSel = pDoc->GetSelectedCount();
@@ -973,6 +1566,9 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
         menu.AppendMenu(MF_STRING, ID_MODIFY_DELETE, L"Delete");
         menu.AppendMenu(MF_STRING, ID_MODIFY_MOVE,   L"Move");
         menu.AppendMenu(MF_STRING, ID_MODIFY_COPY,   L"Copy");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_ROTATE, L"Rotate");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_SCALE,  L"Scale");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_MIRROR, L"Mirror");
     }
 
     if (pt.x == -1 && pt.y == -1) {
@@ -987,14 +1583,14 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
 // ============================================================
 // Draw command handlers
 // ============================================================
-void CLargeHWView::OnDrawLine()       { m_tempPts.clear(); SetDrawState(STATE_DRAW_LINE_P1); }
-void CLargeHWView::OnDrawCircle()     { m_tempPts.clear(); SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
-void CLargeHWView::OnDrawArc()        { m_tempPts.clear(); SetDrawState(STATE_DRAW_ARC_P1); }
-void CLargeHWView::OnDrawRectangle()  { m_tempPts.clear(); SetDrawState(STATE_DRAW_RECT_P1); }
-void CLargeHWView::OnDrawEllipse()    { m_tempPts.clear(); SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
-void CLargeHWView::OnDrawPolyline()   { m_tempPts.clear(); m_bPolylineClose = false; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
-void CLargeHWView::OnDrawText()       { m_tempPts.clear(); SetDrawState(STATE_DRAW_TEXT_POS); }
-void CLargeHWView::OnDrawPolygon()    { m_tempPts.clear(); m_nPolygonSides = 6; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
+void CLargeHWView::OnDrawLine()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_LINE; SetDrawState(STATE_DRAW_LINE_P1); }
+void CLargeHWView::OnDrawCircle()     { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_CIRCLE; SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
+void CLargeHWView::OnDrawArc()        { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
+void CLargeHWView::OnDrawRectangle()  { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
+void CLargeHWView::OnDrawEllipse()    { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
+void CLargeHWView::OnDrawPolyline()   { m_tempPts.clear(); m_bPolylineClose = false; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
+void CLargeHWView::OnDrawText()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_TEXT; SetDrawState(STATE_DRAW_TEXT_POS); }
+void CLargeHWView::OnDrawPolygon()    { m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
 
 // ============================================================
 // Modify command handlers
@@ -1003,11 +1599,16 @@ void CLargeHWView::OnModifyMove()
 {
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc->GetSelectedCount() > 0) {
+    m_nLastCommandID = ID_MODIFY_MOVE;
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyMove called, selected=%d, entCount=%d\n", nSel, (int)pDoc->GetEntities().size());
+    if (nSel > 0) {
         m_tempPts.push_back(CPoint(0, 0));
         SetDrawState(STATE_MOVE_BASE);
+        TRACE(L"[DEBUG] OnModifyMove: entities pre-selected, state=STATE_MOVE_BASE\n");
     } else {
         SetDrawState(STATE_MOVE_SELECT);
+        TRACE(L"[DEBUG] OnModifyMove: no selection, state=STATE_MOVE_SELECT\n");
     }
 }
 
@@ -1015,25 +1616,83 @@ void CLargeHWView::OnModifyCopy()
 {
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc->GetSelectedCount() > 0) {
+    m_nLastCommandID = ID_MODIFY_COPY;
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyCopy called, selected=%d, entCount=%d\n", nSel, (int)pDoc->GetEntities().size());
+    if (nSel > 0) {
         m_tempPts.push_back(CPoint(0, 0));
         SetDrawState(STATE_COPY_BASE);
+        TRACE(L"[DEBUG] OnModifyCopy: entities pre-selected, state=STATE_COPY_BASE\n");
     } else {
         SetDrawState(STATE_COPY_SELECT);
+        TRACE(L"[DEBUG] OnModifyCopy: no selection, state=STATE_COPY_SELECT\n");
     }
 }
 
 void CLargeHWView::OnModifyDelete()
 {
     CLargeHWDoc* pDoc = GetDocument();
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyDelete called, selected=%d\n", nSel);
     pDoc->DeleteSelected();
     Invalidate(FALSE);
 }
 
-void CLargeHWView::OnModifyRotate()  { AfxMessageBox(L"ROTATE: TODO"); }
-void CLargeHWView::OnModifyScale()   { AfxMessageBox(L"SCALE: TODO"); }
-void CLargeHWView::OnModifyMirror()  { AfxMessageBox(L"MIRROR: TODO"); }
-void CLargeHWView::OnModifyOffset()  { AfxMessageBox(L"OFFSET: TODO"); }
+void CLargeHWView::OnModifyRotate()
+{
+    m_tempPts.clear();
+    CLargeHWDoc* pDoc = GetDocument();
+    m_nLastCommandID = ID_MODIFY_ROTATE;
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyRotate called, selected=%d, entCount=%d\n", nSel, (int)pDoc->GetEntities().size());
+    if (nSel > 0) {
+        SetDrawState(STATE_ROTATE_CENTER);
+        TRACE(L"[DEBUG] OnModifyRotate: entities pre-selected, state=STATE_ROTATE_CENTER\n");
+    } else {
+        SetDrawState(STATE_ROTATE_SELECT);
+        TRACE(L"[DEBUG] OnModifyRotate: no selection, state=STATE_ROTATE_SELECT\n");
+    }
+}
+
+void CLargeHWView::OnModifyScale()
+{
+    m_tempPts.clear();
+    CLargeHWDoc* pDoc = GetDocument();
+    m_nLastCommandID = ID_MODIFY_SCALE;
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyScale called, selected=%d, entCount=%d\n", nSel, (int)pDoc->GetEntities().size());
+    if (nSel > 0) {
+        SetDrawState(STATE_SCALE_BASE);
+        TRACE(L"[DEBUG] OnModifyScale: entities pre-selected, state=STATE_SCALE_BASE\n");
+    } else {
+        SetDrawState(STATE_SCALE_SELECT);
+        TRACE(L"[DEBUG] OnModifyScale: no selection, state=STATE_SCALE_SELECT\n");
+    }
+}
+
+void CLargeHWView::OnModifyMirror()
+{
+    m_tempPts.clear();
+    CLargeHWDoc* pDoc = GetDocument();
+    m_nLastCommandID = ID_MODIFY_MIRROR;
+    int nSel = pDoc->GetSelectedCount();
+    TRACE(L"[DEBUG] OnModifyMirror called, selected=%d, entCount=%d\n", nSel, (int)pDoc->GetEntities().size());
+    if (nSel > 0) {
+        SetDrawState(STATE_MIRROR_P1);
+        TRACE(L"[DEBUG] OnModifyMirror: entities pre-selected, state=STATE_MIRROR_P1\n");
+    } else {
+        SetDrawState(STATE_MIRROR_SELECT);
+        TRACE(L"[DEBUG] OnModifyMirror: no selection, state=STATE_MIRROR_SELECT\n");
+    }
+}
+
+void CLargeHWView::OnModifyOffset()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_MODIFY_OFFSET;
+    TRACE(L"[DEBUG] OnModifyOffset called, state=STATE_OFFSET_SELECT\n");
+    SetDrawState(STATE_OFFSET_SELECT);
+}
 
 // ============================================================
 // Edit commands
@@ -1042,6 +1701,7 @@ void CLargeHWView::OnEditUndo()
 {
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Undo();
+    UpdateStatusBar();
     Invalidate(FALSE);
 }
 
@@ -1049,7 +1709,20 @@ void CLargeHWView::OnEditRedo()
 {
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Redo();
+    UpdateStatusBar();
     Invalidate(FALSE);
+}
+
+void CLargeHWView::OnUpdateEditUndo(CCmdUI* pCmdUI)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    pCmdUI->Enable(pDoc && pDoc->CanUndo());
+}
+
+void CLargeHWView::OnUpdateEditRedo(CCmdUI* pCmdUI)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    pCmdUI->Enable(pDoc && pDoc->CanRedo());
 }
 
 void CLargeHWView::OnEditSelectAll()
@@ -1094,8 +1767,20 @@ void CLargeHWView::OnViewZoomExtents()
     Invalidate(FALSE);
 }
 
-void CLargeHWView::OnViewZoomWindow()   { AfxMessageBox(L"ZOOM Window: TODO"); }
-void CLargeHWView::OnViewPan()          { AfxMessageBox(L"PAN: Hold middle mouse to pan"); }
+void CLargeHWView::OnViewZoomWindow()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_VIEW_ZOOM_WINDOW;
+    SetDrawState(STATE_ZOOM_WINDOW_P1);
+}
+
+void CLargeHWView::OnViewPan()
+{
+    m_nLastCommandID = ID_VIEW_PAN;
+    CLargeHWDoc* pDoc = GetDocument();
+    pDoc->m_strCommandPrompt = L"PAN: Hold and drag middle mouse button to pan. Press Esc to cancel.";
+    UpdateStatusBar();
+}
 
 void CLargeHWView::OnViewGrid()
 {
@@ -1150,6 +1835,311 @@ void CLargeHWView::OnCancelCommand()
 }
 
 // ============================================================
+// Format commands
+// ============================================================
+void CLargeHWView::OnFormatLayer()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    const auto& layers = pDoc->GetLayers();
+
+    CMenu menu;
+    menu.CreatePopupMenu();
+    for (size_t i = 0; i < layers.size(); ++i) {
+        UINT flags = MF_STRING;
+        if (layers[i] == pDoc->GetCurrentLayer())
+            flags |= MF_CHECKED;
+        menu.AppendMenu(flags, 10000 + (UINT)i, layers[i]);
+    }
+    menu.AppendMenu(MF_SEPARATOR);
+    menu.AppendMenu(MF_STRING, 10099, L"New Layer...");
+
+    CPoint pt;
+    GetCursorPos(&pt);
+
+    int nSel = menu.TrackPopupMenu(TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, this);
+    menu.DestroyMenu();
+
+    if (nSel >= 10000 && nSel < 10099) {
+        int idx = nSel - 10000;
+        if (idx < (int)layers.size()) {
+            pDoc->SetCurrentLayer(layers[idx]);
+            pDoc->m_strCommandPrompt.Format(L"Current layer: %s", (LPCTSTR)layers[idx]);
+        }
+    } else if (nSel == 10099) {
+        CString strName;
+        strName.Format(L"Layer%d", (int)layers.size() + 1);
+        pDoc->AddLayer(strName);
+        pDoc->SetCurrentLayer(strName);
+        pDoc->m_strCommandPrompt.Format(L"New layer created: %s", (LPCTSTR)strName);
+    }
+    UpdateStatusBar();
+}
+
+void CLargeHWView::OnContextRepeat()
+{
+    RepeatLastCommand();
+}
+
+void CLargeHWView::RepeatLastCommand()
+{
+    if (m_nLastCommandID == 0) return;
+    switch (m_nLastCommandID) {
+    case ID_DRAW_LINE:       OnDrawLine(); break;
+    case ID_DRAW_POLYLINE:   OnDrawPolyline(); break;
+    case ID_DRAW_CIRCLE:     OnDrawCircle(); break;
+    case ID_DRAW_ARC:        OnDrawArc(); break;
+    case ID_DRAW_RECTANGLE:  OnDrawRectangle(); break;
+    case ID_DRAW_POLYGON:    OnDrawPolygon(); break;
+    case ID_DRAW_ELLIPSE:    OnDrawEllipse(); break;
+    case ID_DRAW_TEXT:       OnDrawText(); break;
+    case ID_MODIFY_MOVE:     OnModifyMove(); break;
+    case ID_MODIFY_COPY:     OnModifyCopy(); break;
+    case ID_MODIFY_ROTATE:   OnModifyRotate(); break;
+    case ID_MODIFY_SCALE:    OnModifyScale(); break;
+    case ID_MODIFY_MIRROR:   OnModifyMirror(); break;
+    case ID_MODIFY_OFFSET:   OnModifyOffset(); break;
+    case ID_VIEW_ZOOM_WINDOW: OnViewZoomWindow(); break;
+    default: break;
+    }
+}
+
+// ============================================================
+// Parse coordinate from command line input
+//   "100,200"  -> absolute (100, 200)
+//   "@50,100"  -> relative to ref point (ref+50, ref+100)
+//   "100<45"   -> polar: distance 100 at 45 degrees from ref
+// ============================================================
+CPoint CLargeHWView::ParseCoordinate(const CString& str, CPoint ref) const
+{
+    CString s = str;
+    s.Trim();
+
+    if (s.IsEmpty()) return ref;
+
+    bool bRelative = false;
+    if (s[0] == L'@') {
+        bRelative = true;
+        s = s.Mid(1);
+        s.Trim();
+    }
+
+    // Polar: dist<angle
+    int nLt = s.Find(L'<');
+    if (nLt > 0) {
+        double dist = _wtof(s.Left(nLt));
+        double angleDeg = _wtof(s.Mid(nLt + 1));
+        double angleRad = angleDeg * M_PI / 180.0;
+        return CPoint(ref.x + (int)(dist * cos(angleRad)),
+                      ref.y + (int)(dist * sin(angleRad)));
+    }
+
+    // Cartesian: x,y
+    int nComma = s.Find(L',');
+    if (nComma > 0) {
+        int x = _wtoi(s.Left(nComma));
+        int y = _wtoi(s.Mid(nComma + 1));
+        if (bRelative) return CPoint(ref.x + x, ref.y + y);
+        return CPoint(x, y);
+    }
+
+    // Single number: treat as x-coordinate with y=0, or distance if relative
+    int val = _wtoi(s);
+    if (bRelative) return CPoint(ref.x + val, ref.y);
+    return CPoint(val, ref.y);
+}
+
+// ============================================================
+// Process coordinate input - convert world coords to screen click
+// ============================================================
+void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    CadDrawState state = pDoc->m_drawState;
+
+    // Single-number input for distance/angle states
+    if (strInput.Find(L',') < 0 && strInput[0] != L'@' && strInput.Find(L'<') < 0) {
+        int val = _wtoi(strInput);
+
+        switch (state) {
+        case STATE_DRAW_CIRCLE_RADIUS:
+            if (!m_tempPts.empty()) {
+                int r = abs(val);
+                CCircleEntity* pCir = new CCircleEntity(m_tempPts[0], r);
+                pDoc->AddEntity(pCir);
+                CompleteDrawCommand();
+            }
+            return;
+
+        case STATE_DRAW_POLYGON_RADIUS:
+            if (!m_tempPts.empty()) {
+                int r = abs(val);
+                CPolygonEntity* pPoly = new CPolygonEntity(m_tempPts[0], r, m_nPolygonSides);
+                pDoc->AddEntity(pPoly);
+                CompleteDrawCommand();
+            }
+            return;
+
+        case STATE_DRAW_ELLIPSE_RADIUS:
+            if (!m_tempPts.empty()) {
+                int r = abs(val);
+                CEllipseEntity* pEll = new CEllipseEntity(m_tempPts[0], r, r);
+                pDoc->AddEntity(pEll);
+                CompleteDrawCommand();
+            }
+            return;
+
+        case STATE_ROTATE_ANGLE:
+            if (!m_tempPts.empty()) {
+                double angle = val * M_PI / 180.0;
+                int nCount = pDoc->GetSelectedCount();
+                if (nCount > 0) {
+                    pDoc->RecordModifyUndo();
+                    pDoc->RotateSelected(m_tempPts.back(), angle);
+                    pDoc->m_strCommandPrompt.Format(L"Rotated %d entities (angle=%.1f deg)", nCount, (double)val);
+                }
+                CompleteDrawCommand();
+            }
+            return;
+
+        case STATE_SCALE_FACTOR:
+            if (!m_tempPts.empty()) {
+                double factor = (double)val;
+                if (factor == 0) factor = 1.0;
+                int nCount = pDoc->GetSelectedCount();
+                if (nCount > 0) {
+                    pDoc->RecordModifyUndo();
+                    pDoc->ScaleSelected(m_tempPts.back(), factor);
+                    pDoc->m_strCommandPrompt.Format(L"Scaled %d entities (factor=%.2f)", nCount, factor);
+                }
+                CompleteDrawCommand();
+            }
+            return;
+        }
+    }
+
+    // Coordinate input (comma / @ / polar) - convert world → screen → click
+    CPoint refPt(0, 0);
+    if (!m_tempPts.empty()) refPt = m_tempPts.back();
+
+    CPoint world = ParseCoordinate(strInput, refPt);
+
+    // Apply snap
+    world = SnapToGrid(world);
+    if (pDoc->m_bObjectSnap) world = SnapToObjects(world);
+
+    // Convert to screen and inject as click
+    CPoint screen = WorldToScreen(world);
+    m_ptCurrent = screen;
+    OnLButtonDown(0, screen);
+}
+
+// ============================================================
+// Execute command from command line (AutoCAD-style aliases)
+// ============================================================
+void CLargeHWView::ExecuteCommand(const CString& strCmd)
+{
+    if (strCmd.IsEmpty()) return;
+
+    CString cmd = strCmd;
+    cmd.MakeUpper();
+    cmd.Trim();
+
+    // Cancel current command first if in progress
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    // Commands that cancel ongoing operations
+    if (cmd == L"ESC" || cmd == L"CANCEL" || cmd == L"*CANCEL*") {
+        OnCancelCommand();
+        return;
+    }
+
+    // If currently in a command, cancel first before starting new one
+    if (pDoc->m_drawState != STATE_IDLE) {
+        OnCancelCommand();
+    }
+
+    // --- Draw commands ---
+    if (cmd == L"L" || cmd == L"LINE") {
+        OnDrawLine();
+    } else if (cmd == L"C" || cmd == L"CIRCLE") {
+        OnDrawCircle();
+    } else if (cmd == L"A" || cmd == L"ARC") {
+        OnDrawArc();
+    } else if (cmd == L"REC" || cmd == L"RECTANG" || cmd == L"RECTANGLE") {
+        OnDrawRectangle();
+    } else if (cmd == L"PL" || cmd == L"PLINE" || cmd == L"POLYLINE") {
+        OnDrawPolyline();
+    } else if (cmd == L"EL" || cmd == L"ELLIPSE") {
+        OnDrawEllipse();
+    } else if (cmd == L"POL" || cmd == L"POLYGON") {
+        OnDrawPolygon();
+    } else if (cmd == L"T" || cmd == L"TEXT" || cmd == L"DT" || cmd == L"DTEXT") {
+        OnDrawText();
+
+    // --- Modify commands ---
+    } else if (cmd == L"M" || cmd == L"MOVE") {
+        OnModifyMove();
+    } else if (cmd == L"CO" || cmd == L"CP" || cmd == L"COPY") {
+        OnModifyCopy();
+    } else if (cmd == L"RO" || cmd == L"ROTATE") {
+        OnModifyRotate();
+    } else if (cmd == L"SC" || cmd == L"SCALE") {
+        OnModifyScale();
+    } else if (cmd == L"MI" || cmd == L"MIRROR") {
+        OnModifyMirror();
+    } else if (cmd == L"O" || cmd == L"OFFSET") {
+        OnModifyOffset();
+    } else if (cmd == L"E" || cmd == L"ERASE" || cmd == L"DEL" || cmd == L"DELETE") {
+        OnModifyDelete();
+
+    // --- View commands ---
+    } else if (cmd == L"Z" || cmd == L"ZOOM") {
+        OnViewZoomWindow();
+    } else if (cmd == L"ZE" || cmd == L"ZOOME") {
+        OnViewZoomExtents();
+    } else if (cmd == L"P" || cmd == L"PAN") {
+        OnViewPan();
+
+    // --- Edit commands ---
+    } else if (cmd == L"U" || cmd == L"UNDO") {
+        OnEditUndo();
+    } else if (cmd == L"REDO") {
+        OnEditRedo();
+
+    // --- Toggles ---
+    } else if (cmd == L"GRID" || cmd == L"F7") {
+        pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+    } else if (cmd == L"SNAP" || cmd == L"F9") {
+        pDoc->m_bSnapToGrid = !pDoc->m_bSnapToGrid;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+    } else if (cmd == L"ORTHO" || cmd == L"F8") {
+        pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+    } else if (cmd == L"OSNAP" || cmd == L"F3") {
+        pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
+        UpdateStatusBar();
+        Invalidate(FALSE);
+
+    // --- Unknown command ---
+    } else {
+        pDoc->m_strCommandPrompt.Format(L"Unknown command: \"%s\". Press F1 for help.", (LPCTSTR)strCmd);
+        CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+        if (pFrame && pFrame->m_wndCmdLine.GetSafeHwnd()) {
+            pFrame->m_wndCmdLine.SetWindowText(pDoc->m_strCommandPrompt);
+            int nLen = pDoc->m_strCommandPrompt.GetLength();
+            pFrame->m_wndCmdLine.SetSel(nLen, nLen);
+        }
+    }
+}
+
+// ============================================================
 // Print support
 // ============================================================
 BOOL CLargeHWView::OnPreparePrinting(CPrintInfo* pInfo)
@@ -1157,7 +2147,52 @@ BOOL CLargeHWView::OnPreparePrinting(CPrintInfo* pInfo)
     return DoPreparePrinting(pInfo);
 }
 
-void CLargeHWView::OnBeginPrinting(CDC* /*pDC*/, CPrintInfo* /*pInfo*/) {}
+void CLargeHWView::OnBeginPrinting(CDC* pDC, CPrintInfo* pInfo)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    CRect rcClient;
+    GetClientRect(&rcClient);
+
+    const auto& ents = pDoc->GetEntities();
+    if (ents.empty()) return;
+
+    CRect bounds(INT_MAX, INT_MAX, INT_MIN, INT_MIN);
+    for (const auto* p : ents) {
+        CRect eb = const_cast<CEntity*>(p)->GetBounds();
+        if (eb.left < bounds.left) bounds.left = eb.left;
+        if (eb.top < bounds.top) bounds.top = eb.top;
+        if (eb.right > bounds.right) bounds.right = eb.right;
+        if (eb.bottom > bounds.bottom) bounds.bottom = eb.bottom;
+    }
+    if (bounds.left == INT_MAX) return;
+    bounds.InflateRect(50, 50);
+
+    int pageW = pDC->GetDeviceCaps(HORZRES);
+    int pageH = pDC->GetDeviceCaps(VERTRES);
+
+    double sx = (double)pageW / bounds.Width();
+    double sy = (double)pageH / bounds.Height();
+    double printScale = min(sx, sy);
+
+    CPoint printOffset(
+        (int)(-bounds.left * printScale),
+        (int)(-bounds.top * printScale)
+    );
+
+    double saveScale = pDoc->m_dScale;
+    CPoint saveOffset = pDoc->m_ptOffset;
+
+    pDoc->m_dScale = printScale;
+    pDoc->m_ptOffset = printOffset;
+
+    OnDraw(pDC);
+
+    pDoc->m_dScale = saveScale;
+    pDoc->m_ptOffset = saveOffset;
+}
+
 void CLargeHWView::OnEndPrinting(CDC* /*pDC*/, CPrintInfo* /*pInfo*/) {}
 
 // ============================================================
