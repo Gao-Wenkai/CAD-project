@@ -32,6 +32,12 @@ CLargeHWDoc::CLargeHWDoc() noexcept
     , m_currentLineWidth(1)
     , m_strCurrentLayer(L"0")
     , m_bModified(false)
+    , m_bObjectSnap(true)
+    , m_bSnapEndpoint(true)
+    , m_bSnapMidpoint(true)
+    , m_bSnapCenter(true)
+    , m_bSnapQuadrant(true)
+    , m_bSnapNearest(false)
 {
 }
 
@@ -53,6 +59,9 @@ BOOL CLargeHWDoc::OnNewDocument()
     m_bModified = false;
     m_drawState = STATE_IDLE;
     m_strCommandPrompt = L"Command: ";
+    m_layers.clear();
+    m_layers.push_back(L"0");
+    m_strCurrentLayer = L"0";
 
     return TRUE;
 }
@@ -175,14 +184,14 @@ void CLargeHWDoc::DeselectAll()
 
 void CLargeHWDoc::DeleteSelected()
 {
+    CAction act;
+    act.type = CAction::ACT_DELETE_MULTI;
+    act.pEntity = nullptr;
+
     for (auto it = m_entities.begin(); it != m_entities.end(); ) {
         if ((*it)->m_bSelected) {
-            CAction act;
-            act.type = CAction::ACT_DELETE;
-            act.pEntity = (*it)->Clone();
-            act.nEntityID = (*it)->m_nID;
-            PushUndo(act);
-
+            act.entityIDs.push_back((*it)->m_nID);
+            act.savedEntities.push_back((*it)->Clone());
             delete *it;
             it = m_entities.erase(it);
             m_bModified = true;
@@ -190,6 +199,10 @@ void CLargeHWDoc::DeleteSelected()
             ++it;
         }
     }
+
+    if (!act.entityIDs.empty())
+        PushUndo(act);
+
     SetModifiedFlag();
 }
 
@@ -207,11 +220,93 @@ void CLargeHWDoc::MoveSelected(double dx, double dy)
         if (p->m_bSelected) p->Move(dx, dy);
     m_bModified = true;
     SetModifiedFlag();
+    TRACE(L"[DEBUG] MoveSelected: dx=%.0f, dy=%.0f, totalEntities=%d\n", dx, dy, (int)m_entities.size());
 }
 
 void CLargeHWDoc::EraseSelected()
 {
     DeleteSelected();
+}
+
+void CLargeHWDoc::RotateSelected(CPoint base, double angle)
+{
+    for (auto* p : m_entities)
+        if (p->m_bSelected) p->Rotate(base, angle);
+    m_bModified = true;
+    SetModifiedFlag();
+    TRACE(L"[DEBUG] RotateSelected: base=(%d,%d), angle=%.3f rad (%.1f deg)\n", base.x, base.y, angle, angle * 180.0 / M_PI);
+}
+
+void CLargeHWDoc::ScaleSelected(CPoint base, double factor)
+{
+    for (auto* p : m_entities)
+        if (p->m_bSelected) p->Scale(base, factor);
+    m_bModified = true;
+    SetModifiedFlag();
+    TRACE(L"[DEBUG] ScaleSelected: base=(%d,%d), factor=%.3f\n", base.x, base.y, factor);
+}
+
+void CLargeHWDoc::MirrorSelected(CPoint p1, CPoint p2)
+{
+    for (auto* p : m_entities)
+        if (p->m_bSelected) p->Mirror(p1, p2);
+    m_bModified = true;
+    SetModifiedFlag();
+    TRACE(L"[DEBUG] MirrorSelected: p1=(%d,%d), p2=(%d,%d)\n", p1.x, p1.y, p2.x, p2.y);
+}
+
+void CLargeHWDoc::CollectSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const
+{
+    points.clear();
+    types.clear();
+    for (const auto* p : m_entities) {
+        if (!p->m_bVisible) continue;
+        const_cast<CEntity*>(p)->GetSnapPoints(points, types);
+    }
+}
+
+void CLargeHWDoc::RecordGripUndo(CEntity* pEntity)
+{
+    if (!pEntity) return;
+    CAction act;
+    act.type = CAction::ACT_MODIFY;
+    act.pEntity = pEntity->Clone();
+    act.nEntityID = pEntity->m_nID;
+    PushUndo(act);
+}
+
+void CLargeHWDoc::RecordModifyUndo()
+{
+    if (GetSelectedCount() == 0) return;
+
+    CAction act;
+    act.type = CAction::ACT_MODIFY_MULTI;
+    act.pEntity = nullptr;
+    for (auto* p : m_entities) {
+        if (p->m_bSelected) {
+            act.entityIDs.push_back(p->m_nID);
+            act.savedEntities.push_back(p->Clone());
+        }
+    }
+    PushUndo(act);
+}
+
+void CLargeHWDoc::RecordCreateUndo(const std::vector<int>& entityIDs)
+{
+    if (entityIDs.empty()) return;
+
+    CAction act;
+    act.type = CAction::ACT_CREATE_MULTI;
+    act.pEntity = nullptr;
+    act.entityIDs = entityIDs;
+    PushUndo(act);
+}
+
+void CLargeHWDoc::AddLayer(const CString& layer)
+{
+    for (const auto& l : m_layers)
+        if (l == layer) return;
+    m_layers.push_back(layer);
 }
 
 std::vector<CEntity*> CLargeHWDoc::GetSelectedEntities() const
@@ -235,21 +330,30 @@ void CLargeHWDoc::PushUndo(const CAction& action)
 
 void CLargeHWDoc::ClearUndoStack()
 {
-    for (auto& act : m_undoStack)
-        if (act.pEntity) delete act.pEntity;
+    for (auto& act : m_undoStack) {
+        if (act.pEntity) { delete act.pEntity; act.pEntity = nullptr; }
+        for (auto* p : act.savedEntities) delete p;
+        act.savedEntities.clear();
+    }
     m_undoStack.clear();
 }
 
 void CLargeHWDoc::ClearRedoStack()
 {
-    for (auto& act : m_redoStack)
-        if (act.pEntity) delete act.pEntity;
+    for (auto& act : m_redoStack) {
+        if (act.pEntity) { delete act.pEntity; act.pEntity = nullptr; }
+        for (auto* p : act.savedEntities) delete p;
+        act.savedEntities.clear();
+    }
     m_redoStack.clear();
 }
 
 void CLargeHWDoc::Undo()
 {
-    if (m_undoStack.empty()) return;
+    if (m_undoStack.empty()) {
+        m_strCommandPrompt = L"Nothing to undo";
+        return;
+    }
 
     CAction action = m_undoStack.back();
     m_undoStack.pop_back();
@@ -260,8 +364,16 @@ void CLargeHWDoc::Undo()
     switch (action.type) {
     case CAction::ACT_ADD: {
         reverseAction.type = CAction::ACT_DELETE;
-        reverseAction.pEntity = FindEntityByID(action.nEntityID)->Clone();
-        RemoveEntity(action.nEntityID, false);
+        CEntity* pFound = FindEntityByID(action.nEntityID);
+        if (pFound) {
+            reverseAction.pEntity = pFound->Clone();
+            RemoveEntity(action.nEntityID, false);
+            m_strCommandPrompt.Format(L"Undo: removed entity #%d", action.nEntityID);
+        } else {
+            m_strCommandPrompt = L"Undo: entity not found";
+            m_undoStack.push_back(action);
+            return;
+        }
         break;
     }
     case CAction::ACT_DELETE: {
@@ -270,6 +382,76 @@ void CLargeHWDoc::Undo()
         CEntity* restore = action.pEntity->Clone();
         restore->m_nID = action.nEntityID;
         m_entities.push_back(restore);
+        m_strCommandPrompt.Format(L"Undo: restored entity #%d", action.nEntityID);
+        break;
+    }
+    case CAction::ACT_MODIFY: {
+        reverseAction.type = CAction::ACT_MODIFY;
+        CEntity* pCurrent = FindEntityByID(action.nEntityID);
+        if (pCurrent) {
+            reverseAction.pEntity = pCurrent->Clone();
+            for (size_t i = 0; i < m_entities.size(); ++i) {
+                if (m_entities[i]->m_nID == action.nEntityID) {
+                    delete m_entities[i];
+                    m_entities[i] = action.pEntity->Clone();
+                    m_entities[i]->m_nID = action.nEntityID;
+                    break;
+                }
+            }
+            m_strCommandPrompt.Format(L"Undo: reverted entity #%d", action.nEntityID);
+        } else {
+            m_strCommandPrompt = L"Undo: entity not found";
+            m_undoStack.push_back(action);
+            return;
+        }
+        break;
+    }
+    case CAction::ACT_CREATE_MULTI: {
+        reverseAction.type = CAction::ACT_DELETE_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (int id : action.entityIDs) {
+            CEntity* pFound = FindEntityByID(id);
+            if (pFound) {
+                reverseAction.savedEntities.push_back(pFound->Clone());
+                RemoveEntity(id, false);
+            }
+        }
+        m_strCommandPrompt.Format(L"Undo: removed %d entities", (int)action.entityIDs.size());
+        break;
+    }
+    case CAction::ACT_DELETE_MULTI: {
+        reverseAction.type = CAction::ACT_CREATE_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (size_t i = 0; i < action.entityIDs.size() && i < action.savedEntities.size(); ++i) {
+            CEntity* restore = action.savedEntities[i]->Clone();
+            restore->m_nID = action.entityIDs[i];
+            m_entities.push_back(restore);
+        }
+        m_strCommandPrompt.Format(L"Undo: restored %d entities", (int)action.entityIDs.size());
+        break;
+    }
+    case CAction::ACT_MODIFY_MULTI: {
+        reverseAction.type = CAction::ACT_MODIFY_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (size_t i = 0; i < action.entityIDs.size() && i < action.savedEntities.size(); ++i) {
+            int id = action.entityIDs[i];
+            CEntity* pCurrent = FindEntityByID(id);
+            if (pCurrent) {
+                reverseAction.savedEntities.push_back(pCurrent->Clone());
+                for (size_t j = 0; j < m_entities.size(); ++j) {
+                    if (m_entities[j]->m_nID == id) {
+                        delete m_entities[j];
+                        m_entities[j] = action.savedEntities[i]->Clone();
+                        m_entities[j]->m_nID = id;
+                        break;
+                    }
+                }
+            }
+        }
+        m_strCommandPrompt.Format(L"Undo: reverted %d entities", (int)action.entityIDs.size());
         break;
     }
     default:
@@ -286,7 +468,10 @@ void CLargeHWDoc::Undo()
 
 void CLargeHWDoc::Redo()
 {
-    if (m_redoStack.empty()) return;
+    if (m_redoStack.empty()) {
+        m_strCommandPrompt = L"Nothing to redo";
+        return;
+    }
 
     CAction action = m_redoStack.back();
     m_redoStack.pop_back();
@@ -301,12 +486,90 @@ void CLargeHWDoc::Redo()
         CEntity* restore = action.pEntity->Clone();
         restore->m_nID = action.nEntityID;
         m_entities.push_back(restore);
+        m_strCommandPrompt.Format(L"Redo: restored entity #%d", action.nEntityID);
         break;
     }
     case CAction::ACT_DELETE: {
         reverseAction.type = CAction::ACT_ADD;
-        reverseAction.pEntity = FindEntityByID(action.nEntityID)->Clone();
-        RemoveEntity(action.nEntityID, false);
+        CEntity* pFound = FindEntityByID(action.nEntityID);
+        if (pFound) {
+            reverseAction.pEntity = pFound->Clone();
+            RemoveEntity(action.nEntityID, false);
+            m_strCommandPrompt.Format(L"Redo: removed entity #%d", action.nEntityID);
+        } else {
+            m_strCommandPrompt = L"Redo: entity not found";
+            m_redoStack.push_back(action);
+            return;
+        }
+        break;
+    }
+    case CAction::ACT_MODIFY: {
+        reverseAction.type = CAction::ACT_MODIFY;
+        CEntity* pCurrent = FindEntityByID(action.nEntityID);
+        if (pCurrent) {
+            reverseAction.pEntity = pCurrent->Clone();
+            for (size_t i = 0; i < m_entities.size(); ++i) {
+                if (m_entities[i]->m_nID == action.nEntityID) {
+                    delete m_entities[i];
+                    m_entities[i] = action.pEntity->Clone();
+                    m_entities[i]->m_nID = action.nEntityID;
+                    break;
+                }
+            }
+            m_strCommandPrompt.Format(L"Redo: reverted entity #%d", action.nEntityID);
+        } else {
+            m_strCommandPrompt = L"Redo: entity not found";
+            m_redoStack.push_back(action);
+            return;
+        }
+        break;
+    }
+    case CAction::ACT_CREATE_MULTI: {
+        reverseAction.type = CAction::ACT_DELETE_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (size_t i = 0; i < action.entityIDs.size() && i < action.savedEntities.size(); ++i) {
+            CEntity* restore = action.savedEntities[i]->Clone();
+            restore->m_nID = action.entityIDs[i];
+            m_entities.push_back(restore);
+        }
+        m_strCommandPrompt.Format(L"Redo: restored %d entities", (int)action.entityIDs.size());
+        break;
+    }
+    case CAction::ACT_DELETE_MULTI: {
+        reverseAction.type = CAction::ACT_CREATE_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (int id : action.entityIDs) {
+            CEntity* pFound = FindEntityByID(id);
+            if (pFound) {
+                reverseAction.savedEntities.push_back(pFound->Clone());
+                RemoveEntity(id, false);
+            }
+        }
+        m_strCommandPrompt.Format(L"Redo: removed %d entities", (int)action.entityIDs.size());
+        break;
+    }
+    case CAction::ACT_MODIFY_MULTI: {
+        reverseAction.type = CAction::ACT_MODIFY_MULTI;
+        reverseAction.entityIDs = action.entityIDs;
+        reverseAction.pEntity = nullptr;
+        for (size_t i = 0; i < action.entityIDs.size() && i < action.savedEntities.size(); ++i) {
+            int id = action.entityIDs[i];
+            CEntity* pCurrent = FindEntityByID(id);
+            if (pCurrent) {
+                reverseAction.savedEntities.push_back(pCurrent->Clone());
+                for (size_t j = 0; j < m_entities.size(); ++j) {
+                    if (m_entities[j]->m_nID == id) {
+                        delete m_entities[j];
+                        m_entities[j] = action.savedEntities[i]->Clone();
+                        m_entities[j]->m_nID = id;
+                        break;
+                    }
+                }
+            }
+        }
+        m_strCommandPrompt.Format(L"Redo: reverted %d entities", (int)action.entityIDs.size());
         break;
     }
     default:

@@ -59,6 +59,13 @@ enum CadDrawState {
     STATE_SCALE_BASE,
     STATE_SCALE_FACTOR,
     STATE_WINDOW_SELECT,
+    STATE_MIRROR_SELECT,
+    STATE_MIRROR_P1,
+    STATE_MIRROR_P2,
+    STATE_OFFSET_SELECT,
+    STATE_OFFSET_DIST,
+    STATE_ZOOM_WINDOW_P1,
+    STATE_ZOOM_WINDOW_P2,
 };
 
 // Object snap type
@@ -96,6 +103,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset);
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset);
     virtual void   Move(double dx, double dy);
+    virtual void   Rotate(CPoint base, double angle);
+    virtual void   Scale(CPoint base, double factor);
+    virtual void   Mirror(CPoint p1, CPoint p2);
     virtual CRect  GetBounds();
     virtual CEntity* Clone() const;
     virtual void   Serialize(CArchive& ar);
@@ -104,6 +114,7 @@ public:
     virtual CPoint GetGrip(int index);
     virtual void   SetGrip(int index, CPoint pt);
     virtual int    HitTestGrip(CPoint pt, double scale, CPoint offset);
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const;
 
     static int     m_nNextID;
     CPoint ToWorld(CPoint screen, double scale, CPoint offset) const;
@@ -128,6 +139,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -135,6 +149,7 @@ public:
     virtual int    GetGripCount() override { return 2; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -153,6 +168,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -160,6 +178,7 @@ public:
     virtual int    GetGripCount() override { return 5; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -182,6 +201,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -189,6 +211,7 @@ public:
     virtual int    GetGripCount() override { return 3; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -206,6 +229,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -213,6 +239,7 @@ public:
     virtual int    GetGripCount() override { return 4; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -234,6 +261,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -241,6 +271,7 @@ public:
     virtual int    GetGripCount() override { return m_nSides + 1; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -260,6 +291,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -267,6 +301,7 @@ public:
     virtual int    GetGripCount() override { return 5; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -285,6 +320,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -292,6 +330,7 @@ public:
     virtual int    GetGripCount() override { return (int)m_vertices.size(); }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 
     void AddVertex(CPoint pt) { m_vertices.push_back(pt); }
     CPoint GetLastVertex() const { return m_vertices.empty() ? CPoint(0,0) : m_vertices.back(); }
@@ -316,6 +355,9 @@ public:
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
     virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
     virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
     virtual CRect  GetBounds() override;
     virtual CEntity* Clone() const override;
     virtual void   Serialize(CArchive& ar) override;
@@ -323,6 +365,7 @@ public:
     virtual int    GetGripCount() override { return 2; }
     virtual CPoint GetGrip(int index) override;
     virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------
@@ -337,4 +380,39 @@ inline double Distance(CPoint p1, CPoint p2) {
 
 inline CPoint MidPoint(CPoint p1, CPoint p2) {
     return CPoint((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+}
+
+inline double DotProduct(CPoint p1, CPoint p2) {
+    return (double)p1.x * p2.x + (double)p1.y * p2.y;
+}
+
+inline CPoint RotatePoint(CPoint pt, CPoint base, double angle) {
+    double s = sin(angle), c = cos(angle);
+    double dx = pt.x - base.x, dy = pt.y - base.y;
+    return CPoint((int)(base.x + dx * c - dy * s + 0.5),
+                  (int)(base.y + dx * s + dy * c + 0.5));
+}
+
+inline CPoint ScalePoint(CPoint pt, CPoint base, double factor) {
+    return CPoint((int)(base.x + (pt.x - base.x) * factor + 0.5),
+                  (int)(base.y + (pt.y - base.y) * factor + 0.5));
+}
+
+inline CPoint MirrorPoint(CPoint pt, CPoint p1, CPoint p2) {
+    double dx = (double)(p2.x - p1.x);
+    double dy = (double)(p2.y - p1.y);
+    double lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-9) return pt;
+    double t = ((double)(pt.x - p1.x) * dx + (double)(pt.y - p1.y) * dy) / lenSq;
+    double projX = p1.x + t * dx;
+    double projY = p1.y + t * dy;
+    return CPoint((int)(2.0 * projX - pt.x + 0.5), (int)(2.0 * projY - pt.y + 0.5));
+}
+
+inline double AngleBetween(CPoint p1, CPoint p2, CPoint p3) {
+    double a = Distance(p2, p3), b = Distance(p1, p3), c = Distance(p1, p2);
+    double val = (b * b + c * c - a * a) / (2.0 * b * c);
+    if (val > 1.0) val = 1.0;
+    if (val < -1.0) val = -1.0;
+    return acos(val);
 }

@@ -26,6 +26,19 @@ public:
     bool                m_bArcAltHalf;      // Arc: toggle alternate half
     bool                m_bPolylineClose;   // PL: C key toggles close back to start
 
+    // Pan state
+    bool                m_bPanning;
+    CPoint              m_ptPanStart;
+    CPoint              m_ptPanOffsetStart;
+
+    // Snap state
+    CPoint              m_ptSnapped;
+    bool                m_bSnapActive;
+    SnapType            m_nSnapType;
+
+    // Last command tracking
+    UINT                m_nLastCommandID;
+
     COLORREF            m_currentColor;
     int                 m_currentLineStyle;
     int                 m_currentLineWidth;
@@ -39,6 +52,8 @@ public:
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
     afx_msg void OnRButtonDown(UINT nFlags, CPoint point);
     afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
+    afx_msg void OnMButtonDown(UINT nFlags, CPoint point);
+    afx_msg void OnMButtonUp(UINT nFlags, CPoint point);
     afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
     afx_msg BOOL OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message);
     afx_msg void OnSize(UINT nType, int cx, int cy);
@@ -67,6 +82,11 @@ public:
     afx_msg void OnEditUndo();
     afx_msg void OnEditRedo();
     afx_msg void OnEditSelectAll();
+    afx_msg void OnUpdateEditUndo(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateEditRedo(CCmdUI* pCmdUI);
+
+    // Context menu
+    afx_msg void OnContextRepeat();
 
     // View commands
     afx_msg void OnViewZoomExtents();
@@ -93,6 +113,7 @@ public:
     afx_msg void OnLineweight3();
     afx_msg void OnLineweight4();
     afx_msg void OnCancelCommand();
+    afx_msg void OnFormatLayer();
 
 protected:
     virtual BOOL OnPreparePrinting(CPrintInfo* pInfo);
@@ -101,6 +122,9 @@ protected:
 
 public:
     virtual ~CLargeHWView();
+    void ExecuteCommand(const CString& strCmd);
+    void ProcessCoordinateInput(const CString& strInput);
+    CPoint ParseCoordinate(const CString& str, CPoint ref) const;
 
 #ifdef _DEBUG
     virtual void AssertValid() const;
@@ -113,13 +137,17 @@ protected:
     void DrawEntities(CDC* pDC);
     void DrawPreview(CDC* pDC);
     void DrawUCSIcon(CDC* pDC);
+    void DrawSnapMarker(CDC* pDC);
 
     CPoint  SnapToGrid(CPoint pt) const;
+    CPoint  SnapToObjects(CPoint pt);
+    CPoint  ApplyOrtho(CPoint pt, CPoint ref) const;
     CPoint  WorldToScreen(CPoint world) const;
     CPoint  ScreenToWorld(CPoint screen) const;
     void    UpdateStatusBar();
     void    SetDrawState(CadDrawState state);
     void    CompleteDrawCommand();
+    void    RepeatLastCommand();
 
     DECLARE_MESSAGE_MAP()
 };

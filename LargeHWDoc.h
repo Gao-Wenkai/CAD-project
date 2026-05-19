@@ -10,12 +10,14 @@
 // Action record for undo/redo
 struct CAction
 {
-    enum ActionType { ACT_ADD, ACT_DELETE, ACT_MODIFY };
+    enum ActionType { ACT_ADD, ACT_DELETE, ACT_MODIFY, ACT_CREATE_MULTI, ACT_DELETE_MULTI, ACT_MODIFY_MULTI };
 
-    ActionType     type;
-    CEntity*       pEntity;
-    int            nEntityID;
-    CPoint         ptOld, ptNew;
+    ActionType              type;
+    CEntity*                pEntity;        // single entity clone for basic actions
+    int                     nEntityID;
+    CPoint                  ptOld, ptNew;
+    std::vector<int>        entityIDs;      // multi-entity action IDs
+    std::vector<CEntity*>   savedEntities;  // multi-entity action clones
 };
 
 class CLargeHWDoc : public CDocument
@@ -41,8 +43,19 @@ public:
     // Selected entity ops
     int       GetSelectedCount() const;
     void      MoveSelected(double dx, double dy);
+    void      RotateSelected(CPoint base, double angle);
+    void      ScaleSelected(CPoint base, double factor);
+    void      MirrorSelected(CPoint p1, CPoint p2);
     void      EraseSelected();
     std::vector<CEntity*> GetSelectedEntities() const;
+
+    // Snap data collection
+    void      CollectSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const;
+
+    // Grip edit undo
+    void      RecordGripUndo(CEntity* pEntity);
+    void      RecordModifyUndo();
+    void      RecordCreateUndo(const std::vector<int>& entityIDs);
 
     // Undo/Redo
     void      Undo();
@@ -59,10 +72,20 @@ public:
     void      SetCurrentLineWidth(int width) { m_currentLineWidth = width; }
     CString   GetCurrentLayer() const { return m_strCurrentLayer; }
     void      SetCurrentLayer(const CString& layer) { m_strCurrentLayer = layer; }
+    const std::vector<CString>& GetLayers() const { return m_layers; }
+    void      AddLayer(const CString& layer);
 
     // Doc state
     bool      IsModified() const { return m_bModified; }
     void      SetModified(bool b) { m_bModified = b; SetModifiedFlag(b); }
+
+    // Snap settings
+    bool      m_bObjectSnap;
+    bool      m_bSnapEndpoint;
+    bool      m_bSnapMidpoint;
+    bool      m_bSnapCenter;
+    bool      m_bSnapQuadrant;
+    bool      m_bSnapNearest;
 
     // View transform params (written by View)
     double    m_dScale;
@@ -99,6 +122,7 @@ protected:
     int       m_currentLineWidth;
     CString   m_strCurrentLayer;
     bool      m_bModified;
+    std::vector<CString> m_layers;
 
     void ClearUndoStack();
     void ClearRedoStack();
