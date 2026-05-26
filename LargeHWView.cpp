@@ -12,9 +12,91 @@
 #include "LargeHWView.h"
 #include "MainFrm.h"
 
+#include <afxdlgs.h>
+#include <cstdlib>
+#include <cwctype>
+
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
+
+namespace
+{
+CStringA WideToUtf8(const CString& text)
+{
+    int nChars = text.GetLength();
+    if (nChars == 0) return CStringA();
+
+    int nBytes = ::WideCharToMultiByte(CP_UTF8, 0, text, nChars, nullptr, 0, nullptr, nullptr);
+    if (nBytes <= 0) return CStringA();
+
+    CStringA utf8;
+    LPSTR pBuffer = utf8.GetBuffer(nBytes);
+    ::WideCharToMultiByte(CP_UTF8, 0, text, nChars, pBuffer, nBytes, nullptr, nullptr);
+    utf8.ReleaseBuffer(nBytes);
+    return utf8;
+}
+
+bool DecodeTextBytes(const std::vector<BYTE>& bytes, CString& text)
+{
+    text.Empty();
+    if (bytes.empty()) return true;
+
+    if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        int nChars = (int)((bytes.size() - 2) / sizeof(wchar_t));
+        text = CString((LPCWSTR)(bytes.data() + 2), nChars);
+        return true;
+    }
+
+    int nOffset = 0;
+    UINT nCodePage = CP_UTF8;
+    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        nOffset = 3;
+    }
+
+    int nSize = (int)bytes.size() - nOffset;
+    if (nSize <= 0) return true;
+
+    int nChars = ::MultiByteToWideChar(nCodePage, MB_ERR_INVALID_CHARS,
+                                       (LPCCH)bytes.data() + nOffset, nSize,
+                                       nullptr, 0);
+    if (nChars <= 0) {
+        nCodePage = CP_ACP;
+        nChars = ::MultiByteToWideChar(nCodePage, 0,
+                                       (LPCCH)bytes.data(), (int)bytes.size(),
+                                       nullptr, 0);
+        nOffset = 0;
+        nSize = (int)bytes.size();
+    }
+
+    if (nChars <= 0) return false;
+
+    LPWSTR pBuffer = text.GetBuffer(nChars);
+    ::MultiByteToWideChar(nCodePage, 0, (LPCCH)bytes.data() + nOffset, nSize, pBuffer, nChars);
+    text.ReleaseBuffer(nChars);
+    return true;
+}
+
+bool LoadTextFile(const CString& path, CString& text)
+{
+    CFile file;
+    if (!file.Open(path, CFile::modeRead | CFile::shareDenyWrite))
+        return false;
+
+    ULONGLONG nLen64 = file.GetLength();
+    if (nLen64 > INT_MAX) {
+        file.Close();
+        return false;
+    }
+
+    std::vector<BYTE> bytes((size_t)nLen64);
+    if (!bytes.empty())
+        file.Read(bytes.data(), (UINT)bytes.size());
+    file.Close();
+
+    return DecodeTextBytes(bytes, text);
+}
+}
 
 IMPLEMENT_DYNCREATE(CLargeHWView, CView)
 
@@ -126,6 +208,12 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_CONTEXT_CANCEL,  &CLargeHWView::OnCancelCommand)
     ON_COMMAND(ID_CONTEXT_REPEAT,  &CLargeHWView::OnContextRepeat)
     ON_COMMAND(ID_FORMAT_LAYER,    &CLargeHWView::OnFormatLayer)
+    ON_COMMAND(ID_SCRIPT_RUN,      &CLargeHWView::OnScriptRun)
+    ON_COMMAND(ID_SCRIPT_RECORD_START, &CLargeHWView::OnScriptRecordStart)
+    ON_COMMAND(ID_SCRIPT_RECORD_STOP,  &CLargeHWView::OnScriptRecordStop)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RUN, &CLargeHWView::OnUpdateScriptRun)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RECORD_START, &CLargeHWView::OnUpdateScriptRecordStart)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RECORD_STOP,  &CLargeHWView::OnUpdateScriptRecordStop)
 END_MESSAGE_MAP()
 
 // Constructor/Destructor
@@ -148,10 +236,19 @@ CLargeHWView::CLargeHWView() noexcept
     , m_currentColor(RGB(0, 255, 209))
     , m_currentLineStyle(PS_SOLID)
     , m_currentLineWidth(1)
+    , m_bScriptRecording(false)
+    , m_bRunningScript(false)
+    , m_bSubmittingCommandLine(false)
 {
 }
 
-CLargeHWView::~CLargeHWView() {}
+CLargeHWView::~CLargeHWView()
+{
+    if (m_bScriptRecording) {
+        m_scriptRecordFile.Close();
+        m_bScriptRecording = false;
+    }
+}
 
 BOOL CLargeHWView::PreCreateWindow(CREATESTRUCT& cs)
 {
@@ -794,6 +891,11 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
 
     world = worldSnapped;
 
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine &&
+        state != STATE_DRAW_TEXT_POS && ShouldRecordPointForState(state)) {
+        RecordScriptInput(FormatScriptPoint(world));
+    }
+
     // Check grip hit first (only in IDLE state)
     if (state == STATE_IDLE) {
         CEntity* hitEntity = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
@@ -818,7 +920,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pDoc->DeselectAll();
             hit->m_bSelected = true;
         } else {
-            // Ctrl+click on empty space → zoom window drag
+            // Ctrl+click on empty space starts zoom window drag
             if (nFlags & MK_CONTROL) {
                 pDoc->m_drawState = STATE_ZOOM_WINDOW_P1;
                 m_bDrawing = true;
@@ -930,6 +1032,13 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         if (dlg.DoModal() == IDOK) {
             CTextEntity* pText = new CTextEntity(world, dlg.m_strText, dlg.m_nHeight);
             pDoc->AddEntity(pText);
+            if (m_bScriptRecording && !m_bRunningScript) {
+                CString strTextCommand;
+                strTextCommand.Format(L"TEXT %d,%d %d \"%s\"",
+                                      world.x, world.y, dlg.m_nHeight,
+                                      (LPCTSTR)EscapeScriptText(dlg.m_strText));
+                RecordScriptInput(strTextCommand);
+            }
         }
         CompleteDrawCommand();
         break;
@@ -1406,6 +1515,8 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
     case 'C':
         if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"C");
             m_bPolylineClose = !m_bPolylineClose;
             pDoc->m_strCommandPrompt.Format(
                 L"PLINE Specify next point (ENTER to finish) [CLOSE=%s]: ",
@@ -1418,6 +1529,8 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
     case VK_RETURN:
         if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
             CPolylineEntity* pPline = new CPolylineEntity(m_tempPts);
             pPline->m_bClosed = m_bPolylineClose;
             pDoc->AddEntity(pPline);
@@ -1426,6 +1539,8 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
             Invalidate(FALSE);
         }
         if (pDoc->m_drawState == STATE_DRAW_ARC_PREVIEW && m_tempPts.size() >= 3) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
             // Build arc: tempPts[0]=start, [1]=center, [2]=end
             CPoint ptStart  = m_tempPts[0];
             CPoint ptCenter = m_tempPts[1];
@@ -1449,6 +1564,8 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case VK_DELETE:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"ERASE");
         pDoc->DeleteSelected();
         Invalidate(FALSE);
         break;
@@ -1480,24 +1597,32 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case VK_F7:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"GRID");
         pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F9:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"SNAP");
         pDoc->m_bSnapToGrid = !pDoc->m_bSnapToGrid;
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F8:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"ORTHO");
         pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F3:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"OSNAP");
         pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
         UpdateStatusBar();
         Invalidate(FALSE);
@@ -1583,20 +1708,22 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
 // ============================================================
 // Draw command handlers
 // ============================================================
-void CLargeHWView::OnDrawLine()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_LINE; SetDrawState(STATE_DRAW_LINE_P1); }
-void CLargeHWView::OnDrawCircle()     { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_CIRCLE; SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
-void CLargeHWView::OnDrawArc()        { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
-void CLargeHWView::OnDrawRectangle()  { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
-void CLargeHWView::OnDrawEllipse()    { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
-void CLargeHWView::OnDrawPolyline()   { m_tempPts.clear(); m_bPolylineClose = false; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
+void CLargeHWView::OnDrawLine()       { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_LINE; SetDrawState(STATE_DRAW_LINE_P1); }
+void CLargeHWView::OnDrawCircle()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"CIRCLE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_CIRCLE; SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
+void CLargeHWView::OnDrawArc()        { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ARC"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
+void CLargeHWView::OnDrawRectangle()  { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"RECTANGLE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
+void CLargeHWView::OnDrawEllipse()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ELLIPSE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
+void CLargeHWView::OnDrawPolyline()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"PLINE"); m_tempPts.clear(); m_bPolylineClose = false; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
 void CLargeHWView::OnDrawText()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_TEXT; SetDrawState(STATE_DRAW_TEXT_POS); }
-void CLargeHWView::OnDrawPolygon()    { m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
+void CLargeHWView::OnDrawPolygon()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"POLYGON"); m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
 
 // ============================================================
 // Modify command handlers
 // ============================================================
 void CLargeHWView::OnModifyMove()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"MOVE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_MOVE;
@@ -1614,6 +1741,8 @@ void CLargeHWView::OnModifyMove()
 
 void CLargeHWView::OnModifyCopy()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"COPY");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_COPY;
@@ -1631,6 +1760,8 @@ void CLargeHWView::OnModifyCopy()
 
 void CLargeHWView::OnModifyDelete()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ERASE");
     CLargeHWDoc* pDoc = GetDocument();
     int nSel = pDoc->GetSelectedCount();
     TRACE(L"[DEBUG] OnModifyDelete called, selected=%d\n", nSel);
@@ -1640,6 +1771,8 @@ void CLargeHWView::OnModifyDelete()
 
 void CLargeHWView::OnModifyRotate()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ROTATE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_ROTATE;
@@ -1656,6 +1789,8 @@ void CLargeHWView::OnModifyRotate()
 
 void CLargeHWView::OnModifyScale()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"SCALE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_SCALE;
@@ -1672,6 +1807,8 @@ void CLargeHWView::OnModifyScale()
 
 void CLargeHWView::OnModifyMirror()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"MIRROR");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_MIRROR;
@@ -1688,6 +1825,8 @@ void CLargeHWView::OnModifyMirror()
 
 void CLargeHWView::OnModifyOffset()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"OFFSET");
     m_tempPts.clear();
     m_nLastCommandID = ID_MODIFY_OFFSET;
     TRACE(L"[DEBUG] OnModifyOffset called, state=STATE_OFFSET_SELECT\n");
@@ -1699,6 +1838,8 @@ void CLargeHWView::OnModifyOffset()
 // ============================================================
 void CLargeHWView::OnEditUndo()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"UNDO");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Undo();
     UpdateStatusBar();
@@ -1707,6 +1848,8 @@ void CLargeHWView::OnEditUndo()
 
 void CLargeHWView::OnEditRedo()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"REDO");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Redo();
     UpdateStatusBar();
@@ -1738,6 +1881,8 @@ void CLargeHWView::OnEditSelectAll()
 // ============================================================
 void CLargeHWView::OnViewZoomExtents()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ZOOME");
     CLargeHWDoc* pDoc = GetDocument();
     const auto& ents = pDoc->GetEntities();
     if (ents.empty()) return;
@@ -1769,6 +1914,8 @@ void CLargeHWView::OnViewZoomExtents()
 
 void CLargeHWView::OnViewZoomWindow()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ZOOM");
     m_tempPts.clear();
     m_nLastCommandID = ID_VIEW_ZOOM_WINDOW;
     SetDrawState(STATE_ZOOM_WINDOW_P1);
@@ -1776,6 +1923,8 @@ void CLargeHWView::OnViewZoomWindow()
 
 void CLargeHWView::OnViewPan()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"PAN");
     m_nLastCommandID = ID_VIEW_PAN;
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_strCommandPrompt = L"PAN: Hold and drag middle mouse button to pan. Press Esc to cancel.";
@@ -1784,6 +1933,8 @@ void CLargeHWView::OnViewPan()
 
 void CLargeHWView::OnViewGrid()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"GRID");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
     UpdateStatusBar();
@@ -1792,6 +1943,8 @@ void CLargeHWView::OnViewGrid()
 
 void CLargeHWView::OnViewSnap()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"SNAP");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bSnapToGrid = !pDoc->m_bSnapToGrid;
     UpdateStatusBar();
@@ -1799,6 +1952,8 @@ void CLargeHWView::OnViewSnap()
 
 void CLargeHWView::OnViewOrtho()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ORTHO");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
     UpdateStatusBar();
@@ -1807,26 +1962,28 @@ void CLargeHWView::OnViewOrtho()
 // ============================================================
 // Property commands
 // ============================================================
-void CLargeHWView::OnColorRed()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 50, 50));   m_currentColor = RGB(255, 50, 50);   UpdateStatusBar(); }
-void CLargeHWView::OnColorYellow()  { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 255, 50));  m_currentColor = RGB(255, 255, 50);  UpdateStatusBar(); }
-void CLargeHWView::OnColorGreen()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 255, 50));   m_currentColor = RGB(50, 255, 50);   UpdateStatusBar(); }
-void CLargeHWView::OnColorCyan()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(0, 255, 209));   m_currentColor = RGB(0, 255, 209);   UpdateStatusBar(); }
-void CLargeHWView::OnColorBlue()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 100, 255));  m_currentColor = RGB(50, 100, 255);  UpdateStatusBar(); }
-void CLargeHWView::OnColorMagenta() { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 0, 127));   m_currentColor = RGB(255, 0, 127);   UpdateStatusBar(); }
-void CLargeHWView::OnColorWhite()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(240, 240, 240)); m_currentColor = RGB(240, 240, 240); UpdateStatusBar(); }
+void CLargeHWView::OnColorRed()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR RED");     CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 50, 50));   m_currentColor = RGB(255, 50, 50);   UpdateStatusBar(); }
+void CLargeHWView::OnColorYellow()  { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR YELLOW");  CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 255, 50));  m_currentColor = RGB(255, 255, 50);  UpdateStatusBar(); }
+void CLargeHWView::OnColorGreen()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR GREEN");   CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 255, 50));   m_currentColor = RGB(50, 255, 50);   UpdateStatusBar(); }
+void CLargeHWView::OnColorCyan()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR CYAN");    CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(0, 255, 209));   m_currentColor = RGB(0, 255, 209);   UpdateStatusBar(); }
+void CLargeHWView::OnColorBlue()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR BLUE");    CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 100, 255));  m_currentColor = RGB(50, 100, 255);  UpdateStatusBar(); }
+void CLargeHWView::OnColorMagenta() { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR MAGENTA"); CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 0, 127));   m_currentColor = RGB(255, 0, 127);   UpdateStatusBar(); }
+void CLargeHWView::OnColorWhite()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR WHITE");   CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(240, 240, 240)); m_currentColor = RGB(240, 240, 240); UpdateStatusBar(); }
 
-void CLargeHWView::OnLinetypeSolid()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_SOLID);   m_currentLineStyle = PS_SOLID;   UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDash()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASH);    m_currentLineStyle = PS_DASH;    UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDot()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DOT);     m_currentLineStyle = PS_DOT;     UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDashDot() { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASHDOT); m_currentLineStyle = PS_DASHDOT; UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeSolid()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE SOLID");   CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_SOLID);   m_currentLineStyle = PS_SOLID;   UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDash()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DASH");    CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASH);    m_currentLineStyle = PS_DASH;    UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDot()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DOT");     CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DOT);     m_currentLineStyle = PS_DOT;     UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDashDot() { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DASHDOT"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASHDOT); m_currentLineStyle = PS_DASHDOT; UpdateStatusBar(); }
 
-void CLargeHWView::OnLineweight1()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(1); m_currentLineWidth = 1; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight2()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(2); m_currentLineWidth = 2; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight3()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(3); m_currentLineWidth = 3; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight4()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(4); m_currentLineWidth = 4; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight1()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 1"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(1); m_currentLineWidth = 1; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight2()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 2"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(2); m_currentLineWidth = 2; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight3()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 3"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(3); m_currentLineWidth = 3; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight4()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 4"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(4); m_currentLineWidth = 4; UpdateStatusBar(); }
 
 void CLargeHWView::OnCancelCommand()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ESC");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->DeselectAll();
@@ -1875,6 +2032,82 @@ void CLargeHWView::OnFormatLayer()
     UpdateStatusBar();
 }
 
+// ============================================================
+// SCR script commands
+// ============================================================
+void CLargeHWView::OnScriptRun()
+{
+    CFileDialog dlg(TRUE, L"scr", nullptr,
+                    OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+                    L"SCR Script Files (*.scr)|*.scr|Text Files (*.txt)|*.txt|All Files (*.*)|*.*||",
+                    this);
+    if (dlg.DoModal() != IDOK)
+        return;
+
+    if (!ExecuteScriptFile(dlg.GetPathName())) {
+        AfxMessageBox(L"Failed to read SCR script file.", MB_ICONERROR);
+    }
+}
+
+void CLargeHWView::OnScriptRecordStart()
+{
+    if (m_bScriptRecording)
+        return;
+
+    CFileDialog dlg(FALSE, L"scr", L"recording.scr",
+                    OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY,
+                    L"SCR Script Files (*.scr)|*.scr|Text Files (*.txt)|*.txt|All Files (*.*)|*.*||",
+                    this);
+    if (dlg.DoModal() != IDOK)
+        return;
+
+    CString strPath = dlg.GetPathName();
+    if (!m_scriptRecordFile.Open(strPath,
+                                 CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite)) {
+        AfxMessageBox(L"Failed to create SCR script file.", MB_ICONERROR);
+        return;
+    }
+
+    m_strScriptRecordPath = strPath;
+    m_bScriptRecording = true;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc)
+        pDoc->m_strCommandPrompt = L"SCR recording started. Use Script > Stop Recording to finish.";
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+}
+
+void CLargeHWView::OnScriptRecordStop()
+{
+    if (!m_bScriptRecording)
+        return;
+
+    m_scriptRecordFile.Close();
+    m_bScriptRecording = false;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc)
+        pDoc->m_strCommandPrompt.Format(L"SCR recording saved: %s", (LPCTSTR)m_strScriptRecordPath);
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+}
+
+void CLargeHWView::OnUpdateScriptRun(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(!m_bRunningScript);
+}
+
+void CLargeHWView::OnUpdateScriptRecordStart(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(!m_bScriptRecording && !m_bRunningScript);
+}
+
+void CLargeHWView::OnUpdateScriptRecordStop(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(m_bScriptRecording);
+}
+
 void CLargeHWView::OnContextRepeat()
 {
     RepeatLastCommand();
@@ -1901,6 +2134,368 @@ void CLargeHWView::RepeatLastCommand()
     case ID_VIEW_ZOOM_WINDOW: OnViewZoomWindow(); break;
     default: break;
     }
+}
+
+// ============================================================
+// SCR script helpers
+// ============================================================
+CString CLargeHWView::FormatScriptPoint(CPoint pt) const
+{
+    CString str;
+    str.Format(L"%d,%d", pt.x, pt.y);
+    return str;
+}
+
+CString CLargeHWView::EscapeScriptText(const CString& strText) const
+{
+    CString str = strText;
+    str.Replace(L"\"", L"\\\"");
+    return str;
+}
+
+void CLargeHWView::RecordScriptInput(const CString& strInput)
+{
+    if (!m_bScriptRecording || m_bRunningScript)
+        return;
+
+    CString strLine = strInput;
+    strLine.TrimRight(L"\r\n");
+
+    CStringA utf8 = WideToUtf8(strLine);
+    if (!utf8.IsEmpty())
+        m_scriptRecordFile.Write((LPCSTR)utf8, (UINT)utf8.GetLength());
+    m_scriptRecordFile.Write("\r\n", 2);
+    m_scriptRecordFile.Flush();
+}
+
+bool CLargeHWView::IsCoordinateInput(const CString& strInput) const
+{
+    CString str = strInput;
+    str.Trim();
+    if (str.IsEmpty()) return false;
+
+    if (str.Find(L',') >= 0 || str[0] == L'@' || str.Find(L'<') >= 0)
+        return true;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState == STATE_IDLE)
+        return false;
+
+    wchar_t* pEnd = nullptr;
+    wcstod(str, &pEnd);
+    while (pEnd && *pEnd != L'\0' && iswspace(*pEnd))
+        ++pEnd;
+    return pEnd && *pEnd == L'\0';
+}
+
+void CLargeHWView::SyncCommandLinePrompt()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+    if (!pDoc || !pFrame || !pFrame->m_wndCmdLine.GetSafeHwnd())
+        return;
+
+    CString strPrompt = pDoc->m_strCommandPrompt;
+    if (strPrompt.IsEmpty()) strPrompt = L"Command: ";
+    pFrame->m_wndCmdLine.SetWindowText(strPrompt);
+    pFrame->m_wndCmdLine.SetSel(strPrompt.GetLength(), strPrompt.GetLength());
+}
+
+void CLargeHWView::SubmitCommandLineInput(const CString& strInput, bool bRecord)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    CString strCmd = strInput;
+    strCmd.Trim();
+
+    if (strCmd.IsEmpty()) {
+        if (bRecord) RecordScriptInput(L"");
+        m_bSubmittingCommandLine = true;
+        OnKeyDown(VK_RETURN, 1, 0);
+        m_bSubmittingCommandLine = false;
+    } else {
+        CString strUpper = strCmd;
+        strUpper.MakeUpper();
+
+        if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+            (strUpper == L"C" || strUpper == L"CLOSE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            m_bPolylineClose = !m_bPolylineClose;
+            pDoc->m_strCommandPrompt.Format(
+                L"PLINE Specify next point (ENTER to finish) [CLOSE=%s]: ",
+                m_bPolylineClose ? L"ON" : L"OFF");
+            UpdateStatusBar();
+            Invalidate(FALSE);
+        } else if (IsCoordinateInput(strCmd)) {
+            if (bRecord && pDoc->m_drawState != STATE_DRAW_TEXT_POS)
+                RecordScriptInput(strCmd);
+            m_bSubmittingCommandLine = true;
+            ProcessCoordinateInput(strCmd);
+            m_bSubmittingCommandLine = false;
+        } else {
+            bool bTextStart =
+                (strUpper == L"T" || strUpper == L"TEXT" || strUpper == L"DT" || strUpper == L"DTEXT");
+            bool bScriptControl =
+                (strUpper == L"SCRIPT" || strUpper == L"SCR" ||
+                 strUpper == L"SCRIPTREC" || strUpper == L"RECORDSCRIPT" || strUpper == L"SCRREC" ||
+                 strUpper == L"SCRIPTSTOP" || strUpper == L"STOPSCRIPT" || strUpper == L"SCRSTOP");
+            if (bRecord && !bTextStart && !bScriptControl)
+                RecordScriptInput(strCmd);
+
+            m_bSubmittingCommandLine = true;
+            ExecuteCommand(strCmd);
+            m_bSubmittingCommandLine = false;
+        }
+    }
+
+    if (pDoc->m_drawState == STATE_IDLE)
+        pDoc->m_strCommandPrompt = L"Command: ";
+    SyncCommandLinePrompt();
+}
+
+bool CLargeHWView::ShouldRecordPointForState(CadDrawState state) const
+{
+    switch (state) {
+    case STATE_DRAW_LINE_P1:
+    case STATE_DRAW_LINE_P2:
+    case STATE_DRAW_CIRCLE_CENTER:
+    case STATE_DRAW_CIRCLE_RADIUS:
+    case STATE_DRAW_ARC_P1:
+    case STATE_DRAW_ARC_P2:
+    case STATE_DRAW_ARC_P3:
+    case STATE_DRAW_RECT_P1:
+    case STATE_DRAW_RECT_P2:
+    case STATE_DRAW_POLYGON_CENTER:
+    case STATE_DRAW_POLYGON_RADIUS:
+    case STATE_DRAW_ELLIPSE_CENTER:
+    case STATE_DRAW_ELLIPSE_RADIUS:
+    case STATE_DRAW_POLYLINE_POINT:
+    case STATE_MOVE_SELECT:
+    case STATE_MOVE_BASE:
+    case STATE_MOVE_DEST:
+    case STATE_COPY_SELECT:
+    case STATE_COPY_BASE:
+    case STATE_COPY_DEST:
+    case STATE_ROTATE_SELECT:
+    case STATE_ROTATE_CENTER:
+    case STATE_ROTATE_ANGLE:
+    case STATE_SCALE_SELECT:
+    case STATE_SCALE_BASE:
+    case STATE_SCALE_FACTOR:
+    case STATE_MIRROR_SELECT:
+    case STATE_MIRROR_P1:
+    case STATE_MIRROR_P2:
+    case STATE_OFFSET_SELECT:
+    case STATE_OFFSET_DIST:
+    case STATE_ZOOM_WINDOW_P1:
+    case STATE_ZOOM_WINDOW_P2:
+        return true;
+    default:
+        return false;
+    }
+}
+
+CString CLargeHWView::StripScriptComment(const CString& strLine) const
+{
+    bool bInQuote = false;
+    for (int i = 0; i < strLine.GetLength(); ++i) {
+        wchar_t ch = strLine[i];
+        if (ch == L'"') {
+            bInQuote = !bInQuote;
+        } else if (!bInQuote && (ch == L';' || ch == L'#')) {
+            return strLine.Left(i);
+        }
+    }
+    return strLine;
+}
+
+void CLargeHWView::TokenizeScriptLine(const CString& strLine, std::vector<CString>& tokens) const
+{
+    tokens.clear();
+    CString token;
+    bool bInQuote = false;
+
+    for (int i = 0; i < strLine.GetLength(); ++i) {
+        wchar_t ch = strLine[i];
+        if (bInQuote && ch == L'\\' && i + 1 < strLine.GetLength() && strLine[i + 1] == L'"') {
+            token += L'"';
+            ++i;
+        } else if (ch == L'"') {
+            bInQuote = !bInQuote;
+        } else if (!bInQuote && iswspace(ch)) {
+            if (!token.IsEmpty()) {
+                tokens.push_back(token);
+                token.Empty();
+            }
+        } else {
+            token += ch;
+        }
+    }
+
+    if (!token.IsEmpty())
+        tokens.push_back(token);
+}
+
+bool CLargeHWView::ExecuteDirectScriptCommand(const CString& strLine)
+{
+    std::vector<CString> tokens;
+    TokenizeScriptLine(strLine, tokens);
+    if (tokens.empty())
+        return true;
+
+    CString cmd = tokens[0];
+    cmd.MakeUpper();
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return true;
+
+    if (cmd == L"TEXT" || cmd == L"T" || cmd == L"DT" || cmd == L"DTEXT") {
+        if (tokens.size() < 4)
+            return false;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        CPoint pos = ParseCoordinate(tokens[1], CPoint(0, 0));
+        int nHeight = _wtoi(tokens[2]);
+        if (nHeight < 1) nHeight = 20;
+
+        CString strText = tokens[3];
+        for (size_t i = 4; i < tokens.size(); ++i) {
+            strText += L" ";
+            strText += tokens[i];
+        }
+
+        CTextEntity* pText = new CTextEntity(pos, strText, nHeight);
+        pDoc->AddEntity(pText);
+        pDoc->m_strCommandPrompt.Format(L"Script TEXT added: %s", (LPCTSTR)strText);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if (cmd == L"COLOR" && tokens.size() >= 2) {
+        CString arg = tokens[1];
+        arg.MakeUpper();
+
+        if (arg == L"RED") OnColorRed();
+        else if (arg == L"YELLOW") OnColorYellow();
+        else if (arg == L"GREEN") OnColorGreen();
+        else if (arg == L"CYAN") OnColorCyan();
+        else if (arg == L"BLUE") OnColorBlue();
+        else if (arg == L"MAGENTA") OnColorMagenta();
+        else if (arg == L"WHITE") OnColorWhite();
+        else if (arg.Find(L',') > 0) {
+            int nFirst = arg.Find(L',');
+            int nSecond = arg.Find(L",", nFirst + 1);
+            if (nSecond > nFirst) {
+                int r = max(0, min(255, _wtoi(arg.Left(nFirst))));
+                int g = max(0, min(255, _wtoi(arg.Mid(nFirst + 1, nSecond - nFirst - 1))));
+                int b = max(0, min(255, _wtoi(arg.Mid(nSecond + 1))));
+                pDoc->SetCurrentColor(RGB(r, g, b));
+                m_currentColor = RGB(r, g, b);
+                UpdateStatusBar();
+            }
+        }
+        return true;
+    }
+
+    if ((cmd == L"LINETYPE" || cmd == L"LTYPE") && tokens.size() >= 2) {
+        CString arg = tokens[1];
+        arg.MakeUpper();
+        if (arg == L"SOLID") OnLinetypeSolid();
+        else if (arg == L"DASH") OnLinetypeDash();
+        else if (arg == L"DOT") OnLinetypeDot();
+        else if (arg == L"DASHDOT") OnLinetypeDashDot();
+        return true;
+    }
+
+    if ((cmd == L"LINEWEIGHT" || cmd == L"LWEIGHT") && tokens.size() >= 2) {
+        int nWidth = _wtoi(tokens[1]);
+        if (nWidth <= 1) OnLineweight1();
+        else if (nWidth == 2) OnLineweight2();
+        else if (nWidth == 3) OnLineweight3();
+        else OnLineweight4();
+        return true;
+    }
+
+    return false;
+}
+
+void CLargeHWView::ExecuteScriptLine(const CString& strLine)
+{
+    CString line = strLine;
+    line.TrimRight(L"\r\n");
+
+    CString trimmed = line;
+    trimmed.Trim();
+    if (trimmed.IsEmpty()) {
+        SubmitCommandLineInput(L"", false);
+        return;
+    }
+
+    CString withoutComment = StripScriptComment(line);
+    withoutComment.Trim();
+    if (withoutComment.IsEmpty())
+        return;
+
+    if (ExecuteDirectScriptCommand(withoutComment))
+        return;
+
+    std::vector<CString> tokens;
+    TokenizeScriptLine(withoutComment, tokens);
+    for (const CString& token : tokens)
+        SubmitCommandLineInput(token, false);
+}
+
+bool CLargeHWView::ExecuteScriptFile(const CString& strPath)
+{
+    CString strContent;
+    if (!LoadTextFile(strPath, strContent))
+        return false;
+
+    bool bPrevRunning = m_bRunningScript;
+    m_bRunningScript = true;
+
+    int nLineCount = 0;
+    int nStart = 0;
+    while (nStart <= strContent.GetLength()) {
+        int nEnd = nStart;
+        while (nEnd < strContent.GetLength() &&
+               strContent[nEnd] != L'\r' &&
+               strContent[nEnd] != L'\n') {
+            ++nEnd;
+        }
+
+        CString strLine = strContent.Mid(nStart, nEnd - nStart);
+        ExecuteScriptLine(strLine);
+        ++nLineCount;
+
+        if (nEnd >= strContent.GetLength())
+            break;
+
+        nStart = nEnd + 1;
+        if (strContent[nEnd] == L'\r' &&
+            nStart < strContent.GetLength() &&
+            strContent[nStart] == L'\n') {
+            ++nStart;
+        }
+    }
+
+    m_bRunningScript = bPrevRunning;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        if (pDoc->m_drawState == STATE_IDLE)
+            pDoc->m_strCommandPrompt.Format(L"Script loaded: %d lines", nLineCount);
+        else
+            pDoc->m_strCommandPrompt.Format(L"Script paused: command needs more input after %d lines", nLineCount);
+    }
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
 }
 
 // ============================================================
@@ -2019,7 +2614,7 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
         }
     }
 
-    // Coordinate input (comma / @ / polar) - convert world → screen → click
+    // Coordinate input (comma / @ / polar) - convert world -> screen -> click
     CPoint refPt(0, 0);
     if (!m_tempPts.empty()) refPt = m_tempPts.back();
 
@@ -2109,6 +2704,14 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
     } else if (cmd == L"REDO") {
         OnEditRedo();
 
+    // --- Scripts ---
+    } else if (cmd == L"SCRIPT" || cmd == L"SCR") {
+        OnScriptRun();
+    } else if (cmd == L"SCRIPTREC" || cmd == L"RECORDSCRIPT" || cmd == L"SCRREC") {
+        OnScriptRecordStart();
+    } else if (cmd == L"SCRIPTSTOP" || cmd == L"STOPSCRIPT" || cmd == L"SCRSTOP") {
+        OnScriptRecordStop();
+
     // --- Toggles ---
     } else if (cmd == L"GRID" || cmd == L"F7") {
         pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
@@ -2126,6 +2729,9 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
         pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
         UpdateStatusBar();
         Invalidate(FALSE);
+
+    } else if (ExecuteDirectScriptCommand(strCmd)) {
+        return;
 
     // --- Unknown command ---
     } else {

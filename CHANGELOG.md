@@ -103,6 +103,13 @@
 ### 13. 右键菜单
 - 右键显示：确认、取消、重复上一命令、窗口缩放、范围缩放
 
+### 14. SCR 脚本录制与读取
+- 新增 脚本 菜单：运行脚本、开始录制、停止录制
+- `SCR` / `SCRIPT` 读取 `.scr` 文件并复用现有命令调度执行
+- `SCRREC` / `SCRIPTREC` / `RECORDSCRIPT` 录制后续命令行输入、菜单命令和鼠标拾取坐标
+- `SCRSTOP` / `SCRIPTSTOP` / `STOPSCRIPT` 停止录制并关闭脚本文件
+- 脚本解析支持空行 Enter、`;` / `#` 注释，以及 `TEXT x,y height "content"` 文字输入
+
 ---
 
 ## Bug 修复
@@ -130,14 +137,14 @@
 | 文件 | 变动行数 | 说明 |
 |------|----------|------|
 | `MainFrm.h` | +4 | OnCtlColor、PreTranslateMessage、ProcessCommandLine 声明 |
-| `MainFrm.cpp` | +155 | 命令行尺寸/样式/颜色、光标修正、命令分发、坐标路由、视图缩放 |
-| `LargeHWView.h` | +28 | ExecuteCommand、ProcessCoordinateInput、ParseCoordinate 等 |
-| `LargeHWView.cpp` | +1125 | 命令解析器、坐标解析器、新绘图/修改/视图/重做状态、捕捉/正交/平移、文字对话框 |
+| `MainFrm.cpp` | +155 | 命令行尺寸/样式/颜色、光标修正、命令分发、坐标路由、视图缩放、脚本菜单 |
+| `LargeHWView.h` | +28 | ExecuteCommand、ProcessCoordinateInput、ParseCoordinate、SCR 脚本接口等 |
+| `LargeHWView.cpp` | +1125 | 命令解析器、坐标解析器、新绘图/修改/视图/重做状态、捕捉/正交/平移、文字对话框、SCR 脚本录制与读取 |
 | `LargeHWDoc.h` | +36 | 捕捉设置、图层、多实体撤销、修改操作 |
 | `LargeHWDoc.cpp` | +295 | 撤销/重做栈、修改操作实现、图层管理 |
 | `Entity.h` | +78 | 新实体类型、捕捉类型、修改虚函数 |
 | `Entity.cpp` | +220 | 矩形、多边形、椭圆、多段线、文字实体及命中检测、修改操作 |
-| `Resource.h` | +5 | `IDD_TEXT_INPUT`、`IDC_TEXT_CONTENT`、`IDC_TEXT_HEIGHT`、`ID_FORMAT_LAYER` |
+| `Resource.h` | +5 | `IDD_TEXT_INPUT`、`IDC_TEXT_CONTENT`、`IDC_TEXT_HEIGHT`、`ID_FORMAT_LAYER`、脚本命令 ID |
 | `LargeHW.rc` | +约1.3KB | 文字输入对话框资源、图层菜单项 |
 
 **合计：10 个文件，+1858 行插入，-87 行删除**

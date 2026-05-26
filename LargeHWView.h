@@ -115,6 +115,14 @@ public:
     afx_msg void OnCancelCommand();
     afx_msg void OnFormatLayer();
 
+    // SCR script commands
+    afx_msg void OnScriptRun();
+    afx_msg void OnScriptRecordStart();
+    afx_msg void OnScriptRecordStop();
+    afx_msg void OnUpdateScriptRun(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateScriptRecordStart(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateScriptRecordStop(CCmdUI* pCmdUI);
+
 protected:
     virtual BOOL OnPreparePrinting(CPrintInfo* pInfo);
     virtual void OnBeginPrinting(CDC* pDC, CPrintInfo* pInfo);
@@ -122,6 +130,7 @@ protected:
 
 public:
     virtual ~CLargeHWView();
+    void SubmitCommandLineInput(const CString& strInput, bool bRecord = true);
     void ExecuteCommand(const CString& strCmd);
     void ProcessCoordinateInput(const CString& strInput);
     CPoint ParseCoordinate(const CString& str, CPoint ref) const;
@@ -148,6 +157,23 @@ protected:
     void    SetDrawState(CadDrawState state);
     void    CompleteDrawCommand();
     void    RepeatLastCommand();
+    void    RecordScriptInput(const CString& strInput);
+    bool    IsCoordinateInput(const CString& strInput) const;
+    bool    ExecuteScriptFile(const CString& strPath);
+    void    ExecuteScriptLine(const CString& strLine);
+    bool    ExecuteDirectScriptCommand(const CString& strLine);
+    void    TokenizeScriptLine(const CString& strLine, std::vector<CString>& tokens) const;
+    CString StripScriptComment(const CString& strLine) const;
+    CString FormatScriptPoint(CPoint pt) const;
+    CString EscapeScriptText(const CString& strText) const;
+    void    SyncCommandLinePrompt();
+    bool    ShouldRecordPointForState(CadDrawState state) const;
+
+    bool    m_bScriptRecording;
+    bool    m_bRunningScript;
+    bool    m_bSubmittingCommandLine;
+    CString m_strScriptRecordPath;
+    CFile   m_scriptRecordFile;
 
     DECLARE_MESSAGE_MAP()
 };

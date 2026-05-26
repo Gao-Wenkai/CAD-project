@@ -41,6 +41,7 @@
 - 撤销/重做 (Undo/Redo)
 - 图元选中高亮 + 夹点 (Grips) 拖拽编辑
 - 文件序列化保存/打开 (CArchive)
+- SCR 脚本录制与读取
 - AutoCAD 风格深色背景 + 十字光标 + UCS 图标
 
 ## 图元体系 (Entity Hierarchy)

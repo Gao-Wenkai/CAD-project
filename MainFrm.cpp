@@ -99,6 +99,16 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         formatMenu.AppendMenu(MF_STRING, ID_FORMAT_LAYER,    L"&Layer...");
         pMenu->InsertMenu(4, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)formatMenu.Detach(), L"F&ormat");
+
+        // Insert Script menu after Format (position 5)
+        CMenu scriptMenu;
+        scriptMenu.CreatePopupMenu();
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RUN,          L"&Run Script...");
+        scriptMenu.AppendMenu(MF_SEPARATOR);
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RECORD_START, L"Start &Recording...");
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RECORD_STOP,  L"Stop Re&cording");
+        pMenu->InsertMenu(5, MF_BYPOSITION | MF_POPUP,
+                          (UINT_PTR)scriptMenu.Detach(), L"&Script");
     }
 
     // 2. Command line (bottom of window) - AutoCAD-style
@@ -261,30 +271,7 @@ void CMainFrame::ProcessCommandLine()
     }
     strCmd.Trim();
 
-    if (strCmd.IsEmpty()) {
-        pView->SendMessage(WM_KEYDOWN, VK_RETURN, 0);
-    }
-    // Coordinate input: comma, @, <, or single number while in a point-entry state
-    else if (strCmd.Find(L',') >= 0 || strCmd[0] == L'@' || strCmd.Find(L'<') >= 0 ||
-             (pDoc && pDoc->m_drawState != STATE_IDLE && _wtoi(strCmd) != 0 && strCmd != L"0")) {
-        pView->ProcessCoordinateInput(strCmd);
-    }
-    // Command input
-    else {
-        pView->ExecuteCommand(strCmd);
-    }
-
-    // Reset to default prompt if still in idle state
-    if (pDoc && pDoc->m_drawState == STATE_IDLE) {
-        pDoc->m_strCommandPrompt = L"Command: ";
-    }
-
-    // Reset command line text + cursor at end
-    CString strPrompt;
-    if (pDoc) strPrompt = pDoc->m_strCommandPrompt;
-    if (strPrompt.IsEmpty()) strPrompt = L"Command: ";
-    m_wndCmdLine.SetWindowText(strPrompt);
-    m_wndCmdLine.SetSel(strPrompt.GetLength(), strPrompt.GetLength());
+    pView->SubmitCommandLineInput(strCmd);
 }
 
 #ifdef _DEBUG
