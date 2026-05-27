@@ -109,6 +109,7 @@
 - `SCRREC` / `SCRIPTREC` / `RECORDSCRIPT` 录制后续命令行输入、菜单命令和鼠标拾取坐标
 - `SCRSTOP` / `SCRIPTSTOP` / `STOPSCRIPT` 停止录制并关闭脚本文件
 - 脚本解析支持空行 Enter、`;` / `#` 注释，以及 `TEXT x,y height "content"` 文字输入
+- 扩展 SCR 读取覆盖：`_.` / `_` / `-` 命令前缀、`LINE`、`CIRCLE`、`ARC _C`、`PLINE`、`RECTANGLE`、`ELLIPSE`、`POLYGON`、`POINT`、`LAYER`、`COLOR`、`LINETYPE`、`LINEWEIGHT`、`GRID/SNAP/ORTHO/OSNAP ON|OFF`，以及 `SELECT/ERASE/MOVE/COPY/ROTATE/SCALE/MIRROR/OFFSET ALL ...`
 
 ---
 

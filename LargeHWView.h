@@ -172,6 +172,7 @@ protected:
     bool    m_bScriptRecording;
     bool    m_bRunningScript;
     bool    m_bSubmittingCommandLine;
+    double  m_dScriptCoordinateScale;
     CString m_strScriptRecordPath;
     CFile   m_scriptRecordFile;
 
