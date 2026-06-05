@@ -90,3 +90,19 @@ CEntity (抽象基类)
 | `MainFrm.h / MainFrm.cpp` | 主框架窗口 |
 | `LargeHW.h / LargeHW.cpp` | 应用程序入口 |
 | `res/` | 图标、位图等资源文件 |
+
+## Current Command Additions
+
+| Command | Alias | Behavior |
+|------|------|------|
+| Chamfer | `CHA` | Select two `LINE` entities to trim and connect them with a chamfer segment. Enter a number at the first prompt to set the chamfer distance. |
+| Array | `AR` | Rectangular array for selected entities: rows, columns, row spacing, then column spacing. |
+| Zoom Extents | `ZE`, `ZOOME`, `ZOOM E`, `Z` then `E` | Fits all visible entities in the current view. |
+
+SCR/direct examples:
+
+```scr
+ARRAY ALL 3 4 100 200
+CHAMFER 20
+ZOOM E
+```

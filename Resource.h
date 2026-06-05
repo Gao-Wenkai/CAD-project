@@ -25,6 +25,9 @@
 #define ID_MODIFY_DELETE                1105
 #define ID_MODIFY_MIRROR                1106
 #define ID_MODIFY_OFFSET                1107
+#define ID_MODIFY_CHAMFER               1108
+#define ID_MODIFY_ARRAY                 1109
+#define ID_MODIFY_FILLET                1110
 
 #define ID_CAD_UNDO                    1201
 #define ID_CAD_REDO                    1202

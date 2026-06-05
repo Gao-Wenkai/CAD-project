@@ -214,3 +214,19 @@ msbuild LargeHW.sln /p:Configuration=Debug /p:Platform=x64
 | `F7` | 切换网格显示 |
 | `F8` | 切换正交模式 |
 | `F9` | 切换吸附网格 |
+
+## Current Command Additions
+
+| Command | Alias | Steps |
+|------|------|------|
+| `CHAMFER` | `CHA` | Select first `LINE` -> optionally enter distance -> select second `LINE`. |
+| `ARRAY` / `ARRAYRECT` | `AR` | Select objects -> rows -> columns -> row spacing -> column spacing. |
+| `ZOOM E` | `ZE` / `ZOOME` / `Z` then `E` | Zoom extents, fitting all visible entities. |
+
+SCR/direct command forms:
+
+```scr
+ARRAY ALL 3 4 100 200
+CHAMFER 20
+ZOOM E
+```
