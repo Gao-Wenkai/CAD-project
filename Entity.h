@@ -46,6 +46,8 @@ enum CadDrawState {
     STATE_DRAW_ELLIPSE_CENTER,
     STATE_DRAW_ELLIPSE_RADIUS,
     STATE_DRAW_POLYLINE_POINT,
+    STATE_DRAW_POLYLINE_START_WIDTH,
+    STATE_DRAW_POLYLINE_END_WIDTH,
     STATE_DRAW_TEXT_POS,
     STATE_MOVE_SELECT,
     STATE_MOVE_BASE,
@@ -325,6 +327,7 @@ public:
     CPolylineEntity(const std::vector<CPoint>& points);
 
     std::vector<CPoint> m_vertices;
+    std::vector<int>    m_vertexWidths;
     bool m_bClosed;
 
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
@@ -342,9 +345,12 @@ public:
     virtual void   SetGrip(int index, CPoint pt) override;
     virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 
-    void AddVertex(CPoint pt) { m_vertices.push_back(pt); }
+    void AddVertex(CPoint pt) { m_vertices.push_back(pt); m_vertexWidths.push_back(max(1, m_nLineWidth)); }
+    void AddVertex(CPoint pt, int width) { m_vertices.push_back(pt); m_vertexWidths.push_back(max(1, width)); }
     CPoint GetLastVertex() const { return m_vertices.empty() ? CPoint(0,0) : m_vertices.back(); }
     int    GetVertexCount() const { return (int)m_vertices.size(); }
+    int    GetVertexWidth(int index) const;
+    void   SetVertexWidth(int index, int width);
 };
 
 // -----------------------------------------------------------

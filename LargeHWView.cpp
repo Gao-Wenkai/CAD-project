@@ -478,6 +478,22 @@ void AppendArcApprox(std::vector<CPoint>& out, CPoint center, int radius, CPoint
             out.push_back(p);
     }
 }
+
+void AppendPolylineArcApprox(std::vector<CPoint>& vertices, CPoint start, CPoint end)
+{
+    double dx = end.x - start.x;
+    double dy = end.y - start.y;
+    double chord = sqrt(dx * dx + dy * dy);
+    if (chord < 1.0)
+        return;
+
+    CPoint center((start.x + end.x) / 2, (start.y + end.y) / 2);
+    int radius = max(1, ScriptRound(chord / 2.0));
+    std::vector<CPoint> arcPts;
+    AppendArcApprox(arcPts, center, radius, start, end);
+    for (size_t i = 1; i < arcPts.size(); ++i)
+        vertices.push_back(arcPts[i]);
+}
 }
 
 IMPLEMENT_DYNCREATE(CLargeHWView, CView)
@@ -611,6 +627,11 @@ CLargeHWView::CLargeHWView() noexcept
     , m_nPolygonSides(6)
     , m_bArcAltHalf(false)
     , m_bPolylineClose(false)
+    , m_bPolylineArcMode(false)
+    , m_nPolylineWidth(1)
+    , m_nPolylineStartWidth(1)
+    , m_nPolylineEndWidth(1)
+    , m_pActivePolyline(nullptr)
     , m_pChamferFirst(nullptr)
     , m_chamferFirstSegment()
     , m_dChamferDistance(20.0)
@@ -815,7 +836,8 @@ void CLargeHWView::DrawPreview(CDC* pDC)
     case STATE_DRAW_LINE_P2:
     case STATE_DRAW_RECT_P2:
         if (m_tempPts.size() >= 1) {
-            CPoint p1 = WorldToScreen(m_tempPts[0]);
+            CPoint p1 = WorldToScreen(
+                pDoc->m_drawState == STATE_DRAW_LINE_P2 ? m_tempPts.back() : m_tempPts[0]);
             pDC->MoveTo(p1);
             pDC->LineTo(cursorPt);
         }
@@ -858,7 +880,7 @@ void CLargeHWView::DrawPreview(CDC* pDC)
 
     case STATE_DRAW_POLYLINE_POINT:
         // Draw all placed segments + rubber band to cursor
-        if (m_tempPts.size() >= 2) {
+        if (!m_pActivePolyline && m_tempPts.size() >= 2) {
             for (size_t i = 0; i < m_tempPts.size() - 1; ++i) {
                 CPoint p1 = WorldToScreen(m_tempPts[i]);
                 CPoint p2 = WorldToScreen(m_tempPts[i+1]);
@@ -868,8 +890,18 @@ void CLargeHWView::DrawPreview(CDC* pDC)
         }
         if (m_tempPts.size() >= 1) {
             CPoint last = WorldToScreen(m_tempPts.back());
-            pDC->MoveTo(last);
-            pDC->LineTo(cursorPt);
+            if (m_bPolylineArcMode) {
+                std::vector<CPoint> previewPts;
+                previewPts.push_back(m_tempPts.back());
+                AppendPolylineArcApprox(previewPts, m_tempPts.back(), curWorld);
+                for (size_t i = 1; i < previewPts.size(); ++i) {
+                    pDC->MoveTo(WorldToScreen(previewPts[i - 1]));
+                    pDC->LineTo(WorldToScreen(previewPts[i]));
+                }
+            } else {
+                pDC->MoveTo(last);
+                pDC->LineTo(cursorPt);
+            }
         }
         // Closed mode: dashed line from last point back to first
         if (m_bPolylineClose && m_tempPts.size() >= 2) {
@@ -1211,7 +1243,9 @@ void CLargeHWView::SetDrawState(CadDrawState state)
     case STATE_DRAW_POLYGON_RADIUS:  pDoc->m_strCommandPrompt = L"POLYGON Specify radius: "; break;
     case STATE_DRAW_ELLIPSE_CENTER:  pDoc->m_strCommandPrompt = L"ELLIPSE Specify center: "; break;
     case STATE_DRAW_ELLIPSE_RADIUS:  pDoc->m_strCommandPrompt = L"ELLIPSE Specify axis endpoint: "; break;
-    case STATE_DRAW_POLYLINE_POINT:  pDoc->m_strCommandPrompt = L"PLINE Specify next point (ENTER to finish): "; break;
+    case STATE_DRAW_POLYLINE_POINT:  pDoc->m_strCommandPrompt.Format(L"PLINE Specify next point [Arc/Line/Width/Close] mode=%s width=%d: ", m_bPolylineArcMode ? L"ARC" : L"LINE", m_nPolylineWidth); break;
+    case STATE_DRAW_POLYLINE_START_WIDTH: pDoc->m_strCommandPrompt.Format(L"PLINE Specify start width <%d>: ", m_nPolylineWidth); break;
+    case STATE_DRAW_POLYLINE_END_WIDTH:   pDoc->m_strCommandPrompt.Format(L"PLINE Specify end width <%d>: ", m_nPolylineWidth); break;
     case STATE_DRAW_TEXT_POS:        pDoc->m_strCommandPrompt = L"TEXT Specify position: "; break;
     case STATE_MOVE_SELECT:          pDoc->m_strCommandPrompt = L"MOVE Select objects: "; break;
     case STATE_MOVE_BASE:            pDoc->m_strCommandPrompt = L"MOVE Specify base point: "; break;
@@ -1261,6 +1295,7 @@ void CLargeHWView::CompleteDrawCommand()
 {
     TRACE(L"[DEBUG] CompleteDrawCommand called\n");
     m_tempPts.clear();
+    m_pActivePolyline = nullptr;
     SetDrawState(STATE_IDLE);
 }
 
@@ -1360,10 +1395,13 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         break;
 
     case STATE_DRAW_LINE_P2: {
-        m_tempPts.push_back(world);
-        CLineEntity* pLine = new CLineEntity(m_tempPts[0], m_tempPts[1]);
+        CLineEntity* pLine = new CLineEntity(m_tempPts.back(), world);
         pDoc->AddEntity(pLine);
-        CompleteDrawCommand();
+        CPoint firstPt = m_tempPts.front();
+        m_tempPts.clear();
+        m_tempPts.push_back(firstPt);
+        m_tempPts.push_back(world);
+        SetDrawState(STATE_DRAW_LINE_P2);
         break;
     }
 
@@ -1438,7 +1476,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     }
 
     case STATE_DRAW_POLYLINE_POINT:
-        m_tempPts.push_back(world);
+        AddPolylinePoint(world);
         SetDrawState(STATE_DRAW_POLYLINE_POINT);
         break;
 
@@ -1987,29 +2025,31 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case 'C':
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 && m_tempPts.size() >= 2) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"C");
+            CloseLineCommand();
+            return;
+        }
         if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
             if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
                 RecordScriptInput(L"C");
-            m_bPolylineClose = !m_bPolylineClose;
-            pDoc->m_strCommandPrompt.Format(
-                L"PLINE Specify next point (ENTER to finish) [CLOSE=%s]: ",
-                m_bPolylineClose ? L"ON" : L"OFF");
-            UpdateStatusBar();
-            Invalidate(FALSE);
+            FinishPolylineCommand(true);
             return;
         }
         break;
 
     case VK_RETURN:
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 && !m_tempPts.empty()) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
+            CompleteDrawCommand();
+            Invalidate(FALSE);
+        }
         if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
             if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
                 RecordScriptInput(L"");
-            CPolylineEntity* pPline = new CPolylineEntity(m_tempPts);
-            pPline->m_bClosed = m_bPolylineClose;
-            pDoc->AddEntity(pPline);
-            m_bPolylineClose = false;
-            CompleteDrawCommand();
-            Invalidate(FALSE);
+            FinishPolylineCommand(false);
         }
         if (pDoc->m_drawState == STATE_DRAW_ARC_PREVIEW && m_tempPts.size() >= 3) {
             if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
@@ -2228,7 +2268,7 @@ void CLargeHWView::OnDrawCircle()     { if (m_bScriptRecording && !m_bRunningScr
 void CLargeHWView::OnDrawArc()        { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ARC"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
 void CLargeHWView::OnDrawRectangle()  { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"RECTANGLE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
 void CLargeHWView::OnDrawEllipse()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ELLIPSE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
-void CLargeHWView::OnDrawPolyline()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"PLINE"); m_tempPts.clear(); m_bPolylineClose = false; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
+void CLargeHWView::OnDrawPolyline()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"PLINE"); m_tempPts.clear(); m_pActivePolyline = nullptr; m_bPolylineClose = false; m_bPolylineArcMode = false; m_nPolylineWidth = max(1, GetDocument()->GetCurrentLineWidth()); m_nPolylineStartWidth = m_nPolylineWidth; m_nPolylineEndWidth = m_nPolylineWidth; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
 void CLargeHWView::OnDrawText()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_TEXT; SetDrawState(STATE_DRAW_TEXT_POS); }
 void CLargeHWView::OnDrawPolygon()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"POLYGON"); m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
 
@@ -2927,6 +2967,92 @@ void CLargeHWView::CreateRectangularArray(int rows, int columns, double rowSpaci
     Invalidate(FALSE);
 }
 
+bool CLargeHWView::CloseLineCommand()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState != STATE_DRAW_LINE_P2 || m_tempPts.size() < 2)
+        return false;
+
+    CPoint firstPt = m_tempPts.front();
+    CPoint lastPt = m_tempPts.back();
+    if (Distance(firstPt, lastPt) <= 0.5)
+        return false;
+
+    CLineEntity* pLine = new CLineEntity(lastPt, firstPt);
+    pDoc->AddEntity(pLine);
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt = L"LINE closed";
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+void CLargeHWView::AddPolylinePoint(CPoint world)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    if (m_tempPts.empty()) {
+        m_tempPts.push_back(world);
+        return;
+    }
+
+    CPoint start = m_tempPts.back();
+    std::vector<CPoint> newPts;
+    newPts.push_back(start);
+    if (m_bPolylineArcMode)
+        AppendPolylineArcApprox(newPts, start, world);
+    else
+        newPts.push_back(world);
+
+    if (!m_pActivePolyline) {
+        std::vector<CPoint> initPts;
+        initPts.push_back(start);
+        m_pActivePolyline = new CPolylineEntity(initPts);
+        m_pActivePolyline->m_vertexWidths.assign(1, max(1, m_nPolylineStartWidth));
+        pDoc->AddEntity(m_pActivePolyline);
+    }
+
+    if ((int)m_pActivePolyline->m_vertexWidths.size() < (int)m_pActivePolyline->m_vertices.size())
+        m_pActivePolyline->m_vertexWidths.resize(m_pActivePolyline->m_vertices.size(), max(1, m_nPolylineWidth));
+
+    if (!m_pActivePolyline->m_vertices.empty())
+        m_pActivePolyline->SetVertexWidth((int)m_pActivePolyline->m_vertices.size() - 1, m_nPolylineStartWidth);
+
+    int countToAdd = (int)newPts.size() - 1;
+    for (int i = 1; i < (int)newPts.size(); ++i) {
+        double t = countToAdd <= 1 ? 1.0 : (double)i / countToAdd;
+        int w = max(1, (int)(m_nPolylineStartWidth +
+                             (m_nPolylineEndWidth - m_nPolylineStartWidth) * t + 0.5));
+        m_pActivePolyline->AddVertex(newPts[i], w);
+        m_tempPts.push_back(newPts[i]);
+    }
+
+    m_nPolylineWidth = max(1, m_nPolylineEndWidth);
+    m_nPolylineStartWidth = m_nPolylineWidth;
+    m_nPolylineEndWidth = m_nPolylineWidth;
+    pDoc->SetModified(true);
+    Invalidate(FALSE);
+}
+
+bool CLargeHWView::FinishPolylineCommand(bool close)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState != STATE_DRAW_POLYLINE_POINT)
+        return false;
+
+    if (close && m_pActivePolyline && m_pActivePolyline->GetVertexCount() >= 3)
+        m_pActivePolyline->m_bClosed = true;
+
+    m_bPolylineClose = false;
+    m_bPolylineArcMode = false;
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt = close ? L"PLINE closed" : L"PLINE finished";
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
 bool CLargeHWView::ProcessArrayParameterInput(const CString& strInput)
 {
     CLargeHWDoc* pDoc = GetDocument();
@@ -3394,15 +3520,28 @@ void CLargeHWView::SubmitCommandLineInput(const CString& strInput, bool bRecord)
     } else {
         CString strUpper = NormalizeScriptWord(strCmd);
 
-        if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 &&
             (strUpper == L"C" || strUpper == L"CLOSE")) {
             if (bRecord) RecordScriptInput(strUpper);
-            m_bPolylineClose = !m_bPolylineClose;
-            pDoc->m_strCommandPrompt.Format(
-                L"PLINE Specify next point (ENTER to finish) [CLOSE=%s]: ",
-                m_bPolylineClose ? L"ON" : L"OFF");
-            UpdateStatusBar();
-            Invalidate(FALSE);
+            CloseLineCommand();
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+            (strUpper == L"C" || strUpper == L"CLOSE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            FinishPolylineCommand(true);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"A" || strUpper == L"ARC")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            m_bPolylineArcMode = true;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"L" || strUpper == L"LINE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            m_bPolylineArcMode = false;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"W" || strUpper == L"WIDTH")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            SetDrawState(STATE_DRAW_POLYLINE_START_WIDTH);
         } else if (pDoc->m_drawState == STATE_ARRAY_SELECT &&
                    (strUpper == L"ALL" || strUpper == L"*")) {
             if (bRecord) RecordScriptInput(strUpper);
@@ -3426,6 +3565,9 @@ void CLargeHWView::SubmitCommandLineInput(const CString& strInput, bool bRecord)
             m_bSubmittingCommandLine = true;
             ProcessCoordinateInput(strCmd);
             m_bSubmittingCommandLine = false;
+        } else if (pDoc->m_drawState != STATE_IDLE) {
+            pDoc->m_strCommandPrompt.Format(L"Invalid option for current command: %s. Press Esc to cancel.", (LPCTSTR)strCmd);
+            UpdateStatusBar();
         } else {
             bool bTextStart =
                 (strUpper == L"T" || strUpper == L"TEXT" || strUpper == L"DT" || strUpper == L"DTEXT");
@@ -3464,6 +3606,8 @@ bool CLargeHWView::ShouldRecordPointForState(CadDrawState state) const
     case STATE_DRAW_ELLIPSE_CENTER:
     case STATE_DRAW_ELLIPSE_RADIUS:
     case STATE_DRAW_POLYLINE_POINT:
+    case STATE_DRAW_POLYLINE_START_WIDTH:
+    case STATE_DRAW_POLYLINE_END_WIDTH:
     case STATE_MOVE_SELECT:
     case STATE_MOVE_BASE:
     case STATE_MOVE_DEST:
@@ -4441,6 +4585,17 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
         case STATE_CHAMFER_SELECT_FIRST:
             m_dChamferDistance = max(0.0, fabs(inputValue * modelUnitScale));
             SetDrawState(STATE_CHAMFER_SELECT_FIRST);
+            return;
+
+        case STATE_DRAW_POLYLINE_START_WIDTH:
+            m_nPolylineStartWidth = max(1, abs(distanceVal));
+            SetDrawState(STATE_DRAW_POLYLINE_END_WIDTH);
+            return;
+
+        case STATE_DRAW_POLYLINE_END_WIDTH:
+            m_nPolylineEndWidth = max(1, abs(distanceVal));
+            m_nPolylineWidth = m_nPolylineEndWidth;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
             return;
 
         case STATE_FILLET_SELECT_FIRST:

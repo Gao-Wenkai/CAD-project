@@ -36,6 +36,11 @@ public:
     int                 m_nPolygonSides;
     bool                m_bArcAltHalf;      // Arc: toggle alternate half
     bool                m_bPolylineClose;   // PL: C key toggles close back to start
+    bool                m_bPolylineArcMode;
+    int                 m_nPolylineWidth;
+    int                 m_nPolylineStartWidth;
+    int                 m_nPolylineEndWidth;
+    CPolylineEntity*    m_pActivePolyline;
     CLineEntity*        m_pChamferFirst;
     ChamferSegmentRef   m_chamferFirstSegment;
     double              m_dChamferDistance;
@@ -188,6 +193,9 @@ protected:
     bool    UpdateArrayDefaultSpacingFromSelection();
     void    CreateRectangularArray(int rows, int columns, double rowSpacing, double columnSpacing);
     bool    ProcessArrayParameterInput(const CString& strInput);
+    bool    CloseLineCommand();
+    bool    FinishPolylineCommand(bool close);
+    void    AddPolylinePoint(CPoint world);
     void    RecordScriptInput(const CString& strInput);
     bool    IsCoordinateInput(const CString& strInput) const;
     bool    ExecuteScriptFile(const CString& strPath);
