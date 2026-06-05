@@ -24,7 +24,8 @@ enum EntityType {
     ENT_POLYGON,
     ENT_ELLIPSE,
     ENT_POLYLINE,
-    ENT_TEXT
+    ENT_TEXT,
+    ENT_POINT
 };
 
 // Drawing interaction state -- simulates AutoCAD command-line prompt flow
@@ -335,6 +336,34 @@ public:
     void AddVertex(CPoint pt) { m_vertices.push_back(pt); }
     CPoint GetLastVertex() const { return m_vertices.empty() ? CPoint(0,0) : m_vertices.back(); }
     int    GetVertexCount() const { return (int)m_vertices.size(); }
+};
+
+// -----------------------------------------------------------
+// CPointEntity -- Point marker
+// -----------------------------------------------------------
+class CPointEntity : public CEntity
+{
+    DECLARE_SERIAL(CPointEntity)
+public:
+    CPointEntity();
+    CPointEntity(CPoint pos);
+
+    CPoint m_ptPosition;
+
+    virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
+    virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
+    virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
+    virtual CRect  GetBounds() override;
+    virtual CEntity* Clone() const override;
+    virtual void   Serialize(CArchive& ar) override;
+
+    virtual int    GetGripCount() override { return 1; }
+    virtual CPoint GetGrip(int index) override;
+    virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------

@@ -39,6 +39,10 @@
 
 #define ID_FORMAT_LAYER                 1501
 
+#define ID_SCRIPT_RUN                   1601
+#define ID_SCRIPT_RECORD_START          1602
+#define ID_SCRIPT_RECORD_STOP           1603
+
 #define ID_PROP_COLOR                   1401
 #define ID_PROP_LINETYPE                1402
 #define ID_PROP_LINEWEIGHT              1403

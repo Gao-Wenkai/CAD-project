@@ -20,6 +20,7 @@ END_MESSAGE_MAP()
 
 CLargeHWDoc::CLargeHWDoc() noexcept
     : m_dScale(1.0)
+    , m_dModelUnitScale(1.0)
     , m_ptOffset(0, 0)
     , m_bShowGrid(true)
     , m_bSnapToGrid(false)
@@ -55,6 +56,7 @@ BOOL CLargeHWDoc::OnNewDocument()
     ClearUndoStack();
     ClearRedoStack();
     m_dScale = 1.0;
+    m_dModelUnitScale = 1.0;
     m_ptOffset = CPoint(0, 0);
     m_bModified = false;
     m_drawState = STATE_IDLE;
@@ -139,17 +141,26 @@ CEntity* CLargeHWDoc::HitTestEntity(CPoint pt, double scale, CPoint offset) cons
     return nullptr;
 }
 
+std::vector<CEntity*> CLargeHWDoc::HitTestEntities(CPoint pt, double scale, CPoint offset) const
+{
+    std::vector<CEntity*> hits;
+    for (auto it = m_entities.rbegin(); it != m_entities.rend(); ++it) {
+        CEntity* p = *it;
+        if (p->m_bVisible && p->HitTest(pt, scale, offset))
+            hits.push_back(p);
+    }
+    return hits;
+}
+
 int CLargeHWDoc::SelectByPoint(CPoint pt, double scale, CPoint offset)
 {
     DeselectAll();
-    for (auto it = m_entities.rbegin(); it != m_entities.rend(); ++it) {
-        CEntity* p = *it;
-        if (p->m_bVisible && p->HitTest(pt, scale, offset)) {
-            p->m_bSelected = true;
-            return 1;
-        }
-    }
-    return 0;
+    std::vector<CEntity*> hits = HitTestEntities(pt, scale, offset);
+    if (hits.empty())
+        return 0;
+
+    hits.front()->m_bSelected = true;
+    return 1;
 }
 
 int CLargeHWDoc::SelectByWindow(CRect rcWindow, double scale, CPoint offset)
@@ -161,13 +172,9 @@ int CLargeHWDoc::SelectByWindow(CRect rcWindow, double scale, CPoint offset)
     for (auto* p : m_entities) {
         if (!p->m_bVisible) continue;
         CRect bounds = p->GetBounds();
-        CRect screenBounds(
-            (int)(bounds.left * scale + offset.x),
-            (int)(bounds.top * scale + offset.y),
-            (int)(bounds.right * scale + offset.x),
-            (int)(bounds.bottom * scale + offset.y)
-        );
-        screenBounds.NormalizeRect();
+        CRect screenBounds = p->ToScreenRect(bounds, scale, offset);
+        int hitTolerance = max(3, p->m_nLineWidth + 2);
+        screenBounds.InflateRect(hitTolerance, hitTolerance);
         CRect intersection;
         if (intersection.IntersectRect(rc, screenBounds)) {
             p->m_bSelected = true;
@@ -600,10 +607,12 @@ void CLargeHWDoc::Serialize(CArchive& ar)
             ar << (int)p->m_Type;
             p->Serialize(ar);
         }
+        ar << m_dModelUnitScale;
     } else {
         RemoveAllEntities();
         ClearUndoStack();
         ClearRedoStack();
+        m_dModelUnitScale = 1.0;
 
         int nCount = 0;
         ar >> nCount;
@@ -625,11 +634,19 @@ void CLargeHWDoc::Serialize(CArchive& ar)
             case ENT_ELLIPSE:   pEntity = new CEllipseEntity(); break;
             case ENT_POLYLINE:  pEntity = new CPolylineEntity(); break;
             case ENT_TEXT:      pEntity = new CTextEntity(); break;
+            case ENT_POINT:     pEntity = new CPointEntity(); break;
             default: continue;
             }
 
             pEntity->Serialize(ar);
             m_entities.push_back(pEntity);
+        }
+
+        CFile* pFile = ar.GetFile();
+        if (pFile && pFile->GetPosition() < pFile->GetLength()) {
+            ar >> m_dModelUnitScale;
+            if (m_dModelUnitScale < 1.0)
+                m_dModelUnitScale = 1.0;
         }
 
         m_bModified = false;
