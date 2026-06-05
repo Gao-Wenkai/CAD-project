@@ -149,3 +149,10 @@
 | `LargeHW.rc` | +约1.3KB | 文字输入对话框资源、图层菜单项 |
 
 **合计：10 个文件，+1858 行插入，-87 行删除**
+
+## Current Update: Chamfer / Array / Zoom E
+
+- Added Modify > Chamfer and `CHAMFER` / `CHA`: line-line chamfer for two `LINE` entities, with numeric distance input.
+- Added Modify > Array and `ARRAY` / `AR` / `ARRAYRECT`: rectangular arrays with rows, columns, row spacing and column spacing.
+- Completed AutoCAD-style Zoom Extents flows: `Z` then `E`, `ZOOM E`, `ZE`, and `ZOOME`.
+- Added SCR/direct examples: `ARRAY ALL 3 4 100 200`, selected-line `CHAMFER 20`, and `ZOOM E`.

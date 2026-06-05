@@ -115,6 +115,32 @@ void CLargeHWDoc::RemoveEntity(int nEntityID, bool bRecordUndo)
     }
 }
 
+void CLargeHWDoc::ReplaceEntity(int nEntityID, CEntity* pReplacement, bool bRecordUndo)
+{
+    if (!pReplacement) return;
+
+    for (size_t i = 0; i < m_entities.size(); ++i) {
+        if (m_entities[i]->m_nID == nEntityID) {
+            if (bRecordUndo) {
+                CAction act;
+                act.type = CAction::ACT_MODIFY;
+                act.pEntity = m_entities[i]->Clone();
+                act.nEntityID = nEntityID;
+                PushUndo(act);
+            }
+
+            pReplacement->m_nID = nEntityID;
+            delete m_entities[i];
+            m_entities[i] = pReplacement;
+            m_bModified = true;
+            SetModifiedFlag();
+            return;
+        }
+    }
+
+    delete pReplacement;
+}
+
 void CLargeHWDoc::RemoveAllEntities()
 {
     for (auto* p : m_entities) delete p;

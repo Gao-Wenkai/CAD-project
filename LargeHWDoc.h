@@ -30,6 +30,7 @@ public:
     // Entity management
     void      AddEntity(CEntity* pEntity, bool bRecordUndo = true);
     void      RemoveEntity(int nEntityID, bool bRecordUndo = true);
+    void      ReplaceEntity(int nEntityID, CEntity* pReplacement, bool bRecordUndo = true);
     void      RemoveAllEntities();
     CEntity*  FindEntityByID(int nID) const;
     CEntity*  HitTestEntity(CPoint pt, double scale, CPoint offset) const;

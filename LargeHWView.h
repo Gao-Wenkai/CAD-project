@@ -12,6 +12,17 @@ protected:
     DECLARE_DYNCREATE(CLargeHWView)
 
 public:
+    struct ChamferSegmentRef
+    {
+        CEntity* pEntity;
+        int      segmentIndex;
+        CPoint   start;
+        CPoint   end;
+
+        ChamferSegmentRef() : pEntity(nullptr), segmentIndex(-1), start(0, 0), end(0, 0) {}
+        bool IsValid() const { return pEntity != nullptr && segmentIndex >= 0; }
+    };
+
     CLargeHWDoc* GetDocument() const;
 
     // Drawing state (temporary interaction data)
@@ -25,6 +36,15 @@ public:
     int                 m_nPolygonSides;
     bool                m_bArcAltHalf;      // Arc: toggle alternate half
     bool                m_bPolylineClose;   // PL: C key toggles close back to start
+    CLineEntity*        m_pChamferFirst;
+    ChamferSegmentRef   m_chamferFirstSegment;
+    double              m_dChamferDistance;
+    ChamferSegmentRef   m_filletFirstSegment;
+    double              m_dFilletRadius;
+    int                 m_nArrayRows;
+    int                 m_nArrayColumns;
+    double              m_dArrayRowSpacing;
+    double              m_dArrayColumnSpacing;
 
     // Pan state
     bool                m_bPanning;
@@ -77,6 +97,9 @@ public:
     afx_msg void OnModifyDelete();
     afx_msg void OnModifyMirror();
     afx_msg void OnModifyOffset();
+    afx_msg void OnModifyChamfer();
+    afx_msg void OnModifyFillet();
+    afx_msg void OnModifyArray();
 
     // Edit commands
     afx_msg void OnEditUndo();
@@ -157,6 +180,14 @@ protected:
     void    SetDrawState(CadDrawState state);
     void    CompleteDrawCommand();
     void    RepeatLastCommand();
+    CLineEntity* HitTestLineEntity(CPoint point) const;
+    ChamferSegmentRef HitTestChamferSegment(CPoint point) const;
+    bool    ApplyChamfer(CLineEntity* pFirst, CLineEntity* pSecond, double distance);
+    bool    ApplyChamfer(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double distance);
+    bool    ApplyFillet(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double radius);
+    bool    UpdateArrayDefaultSpacingFromSelection();
+    void    CreateRectangularArray(int rows, int columns, double rowSpacing, double columnSpacing);
+    bool    ProcessArrayParameterInput(const CString& strInput);
     void    RecordScriptInput(const CString& strInput);
     bool    IsCoordinateInput(const CString& strInput) const;
     bool    ExecuteScriptFile(const CString& strPath);

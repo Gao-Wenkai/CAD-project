@@ -90,6 +90,9 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_DELETE, L"&Erase");
         modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_MIRROR, L"M&irror");
         modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_OFFSET, L"&Offset");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_CHAMFER, L"&Chamfer");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_FILLET, L"&Fillet");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_ARRAY,  L"&Array");
         pMenu->InsertMenu(3, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)modifyMenu.Detach(), L"&Modify");
 
