@@ -79,7 +79,7 @@ static void CreateTemporarySplits(CLargeHWDoc* pDoc, std::vector<int>& outNewIDs
             // compute parameter t on each segment
             double ti = (fabs(x2 - x1) > fabs(y2 - y1)) ? ((px - x1) / (x2 - x1)) : ((py - y1) / (y2 - y1));
             double tj = (fabs(x4 - x3) > fabs(y4 - y3)) ? ((px - x3) / (x4 - x3)) : ((py - y3) / (y4 - y3));
-            if (ti >= -1e-6 && ti <= 1.0+1e-6 && tj >= -1e-6 && tj <= 1.0+1e-6) {
+            if (ti > 1e-4 && ti < 1.0-1e-4 && tj > 1e-4 && tj < 1.0-1e-4) {
                 add_inter((int)i, max(0.0, min(1.0, ti)));
                 add_inter((int)j, max(0.0, min(1.0, tj)));
             }
@@ -92,8 +92,11 @@ static void CreateTemporarySplits(CLargeHWDoc* pDoc, std::vector<int>& outNewIDs
     for (size_t i = 0; i < segs.size(); ++i) {
         auto& seg = segs[i];
         auto& ts = interT[i];
-        // if no intersections, skip
-        if (ts.empty()) continue;
+        // Always create temp entities for polyline segments (break at vertices),
+        // and for line segments that have intersections (break at intersection points).
+        // For standalone lines with no intersections, keep the original visible.
+        if (!seg.ownerIsPolyline && ts.empty()) continue;
+
         // include endpoints 0 and 1
         ts.push_back(0.0); ts.push_back(1.0);
         sort(ts.begin(), ts.end());
@@ -113,11 +116,16 @@ static void CreateTemporarySplits(CLargeHWDoc* pDoc, std::vector<int>& outNewIDs
         }
     }
 
-    // Add created pieces as temporary segments (do not remove originals); record new IDs
+    // Add created pieces as temporary segments; inherit visual properties from originals
     for (auto& kv : createdMap) {
+        CEntity* orig = kv.first;
         for (auto& pr : kv.second) {
             CLineEntity* ln = new CLineEntity(pr.first, pr.second);
             pDoc->AddEntity(ln);
+            // Override after AddEntity (which sets current doc defaults)
+            ln->m_color = orig->m_color;
+            ln->m_nLineStyle = orig->m_nLineStyle;
+            ln->m_nLineWidth = orig->m_nLineWidth;
             outNewIDs.push_back(ln->m_nID);
         }
     }
@@ -603,6 +611,95 @@ void AppendPolylineArcApprox(std::vector<CPoint>& vertices, CPoint start, CPoint
         vertices.push_back(arcPts[i]);
 }
 
+static bool FitCircle3P(CPoint p1, CPoint p2, CPoint p3, CPoint& center, int& radius)
+{
+    double x1 = p1.x, y1 = p1.y;
+    double x2 = p2.x, y2 = p2.y;
+    double x3 = p3.x, y3 = p3.y;
+    double d = 2.0 * (x1*(y2-y3) + x2*(y3-y1) + x3*(y1-y2));
+    if (fabs(d) < 1e-6) return false;
+    double cx = ((x1*x1 + y1*y1)*(y2-y3) + (x2*x2 + y2*y2)*(y3-y1) + (x3*x3 + y3*y3)*(y1-y2)) / d;
+    double cy = ((x1*x1 + y1*y1)*(x3-x2) + (x2*x2 + y2*y2)*(x1-x3) + (x3*x3 + y3*y3)*(x2-x1)) / d;
+    center = CPoint((int)cx, (int)cy);
+    radius = (int)Distance(center, p1);
+    return radius >= 1;
+}
+
+static bool DetectArcInPolyline(const CPolylineEntity* poly, CPoint screenPt,
+                                double scale, CPoint offset,
+                                CPoint& center, int& radius,
+                                CPoint& ptStart, CPoint& ptMid, CPoint& ptEnd,
+                                int& idxStart, int& idxEnd)
+{
+    const auto& v = poly->m_vertices;
+    int n = (int)v.size();
+    if (n < 5) return false;
+
+    int nearestSeg = -1;
+    double bestDist = 1e9;
+    for (int i = 0; i < n - 1; ++i) {
+        CPoint p1((int)(v[i].x * scale + offset.x), (int)(-v[i].y * scale + offset.y));
+        CPoint p2((int)(v[i+1].x * scale + offset.x), (int)(-v[i+1].y * scale + offset.y));
+        double d = PointToLineDistance(screenPt, p1, p2);
+        if (d < bestDist) { bestDist = d; nearestSeg = i; }
+    }
+    if (nearestSeg < 0 || bestDist > 15.0) return false;
+
+    int left = nearestSeg;
+    int right = nearestSeg + 1;
+    if (right - left < 2) {
+        if (left > 0) left--;
+        if (right < n - 1) right++;
+    }
+    if (right - left < 2) return false;
+
+    CPoint refCenter;
+    int refRadius;
+    int mid = (left + right) / 2;
+    if (!FitCircle3P(v[left], v[mid], v[right], refCenter, refRadius))
+        return false;
+    if (refRadius < 1 || refRadius > 50000)
+        return false;
+
+    const int TOL = 5;
+    for (int i = left; i <= right; ++i) {
+        int d = (int)Distance(v[i], refCenter);
+        if (abs(d - refRadius) > TOL) return false;
+    }
+
+    while (left > 0) {
+        int d = (int)Distance(v[left-1], refCenter);
+        if (abs(d - refRadius) > TOL) break;
+        left--;
+    }
+    while (right < n - 1) {
+        int d = (int)Distance(v[right+1], refCenter);
+        if (abs(d - refRadius) > TOL) break;
+        right++;
+    }
+
+    if (right - left < 3) return false;
+
+    if (!FitCircle3P(v[left], v[(left+right)/2], v[right], refCenter, refRadius))
+        return false;
+
+    center = refCenter;
+    radius = refRadius;
+    ptStart = v[left];
+    ptEnd = v[right];
+    idxStart = left;
+    idxEnd = right;
+
+    double angS = atan2((double)(ptStart.y - center.y), (double)(ptStart.x - center.x));
+    double angE = atan2((double)(ptEnd.y - center.y), (double)(ptEnd.x - center.x));
+    double sweep = angE - angS;
+    if (sweep < 0) sweep += 2.0 * M_PI;
+    double angMid = angS + sweep / 2.0;
+    ptMid = CPoint((int)(center.x + radius * cos(angMid) + 0.5),
+                   (int)(center.y + radius * sin(angMid) + 0.5));
+    return true;
+}
+}
 
 IMPLEMENT_DYNCREATE(CLargeHWView, CView)
 
@@ -773,6 +870,9 @@ CLargeHWView::CLargeHWView() noexcept
     , m_pDimRadiusSrcEnt(nullptr)
     , m_pDimDiamSrcEnt(nullptr)
     , m_pDimArcLenSrcEnt(nullptr)
+    , m_bDimRadiusSrcTemp(false)
+    , m_bDimDiamSrcTemp(false)
+    , m_bDimArcLenSrcTemp(false)
     , m_bCoordDimMode(false)
     , m_ptCoordPoint(0,0)
     , m_bScriptRecording(false)
@@ -928,7 +1028,13 @@ void CLargeHWView::DrawEntities(CDC* pDC)
         p->Draw(pDC, pDoc->m_dScale, pDoc->m_ptOffset);
         if (p->m_bSelected) {
             CRect bounds = p->GetBounds();
-            if (pDoc->m_drawState >= STATE_DRAW_DIM_LENGTH_P1 && pDoc->m_drawState <= STATE_DRAW_DIM_COORD_PICK) {
+            // Radius/Diameter/Arc-length dimension: no selection highlight needed
+            CadDrawState st = pDoc->m_drawState;
+            if (st == STATE_DRAW_DIM_RADIUS_SELECT || st == STATE_DRAW_DIM_RADIUS_POS ||
+                st == STATE_DRAW_DIM_DIAMETER_SELECT || st == STATE_DRAW_DIM_DIAMETER_POS ||
+                st == STATE_DRAW_DIM_ARCLEN_SELECT || st == STATE_DRAW_DIM_ARCLEN_POS) {
+                // skip
+            } else if (st >= STATE_DRAW_DIM_LENGTH_P1 && st <= STATE_DRAW_DIM_COORD_PICK) {
         // draw selection overlay for different entity types (thick cyan stroke)
         for (size_t j = 0; j < ents.size(); ++j) {
             CEntity* e2 = const_cast<CEntity*>(ents[j]);
@@ -1256,7 +1362,11 @@ void CLargeHWView::DrawPreview(CDC* pDC)
                 double x1 = a1.x, y1 = a1.y, x2 = a2.x, y2 = a2.y;
                 double x3 = b1.x, y3 = b1.y, x4 = b2.x, y4 = b2.y;
                 double den = (x1 - x2)*(y3 - y4) - (y1 - y2)*(x3 - x4);
-                if (fabs(den) < 1e-6) center = MidPoint(a1, a2);
+                if (fabs(den) < 1e-6) {
+                    CPoint cp1 = ClosestPointOnSegment(a1, a2, b1);
+                    CPoint cp2 = ClosestPointOnSegment(b1, b2, cp1);
+                    center = MidPoint(cp1, cp2);
+                }
                 else {
                     double px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / den;
                     double py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / den;
@@ -1329,8 +1439,8 @@ void CLargeHWView::DrawPreview(CDC* pDC)
 
             // draw rays and arc in screen coordinates
             CPoint sc = WorldToScreen(center);
-            CPoint scrStart((int)floor(sc.x + scrR * cos(start) + 0.5), (int)floor(sc.y + scrR * sin(start) + 0.5));
-            CPoint scrEnd((int)floor(sc.x + scrR * cos(end) + 0.5),   (int)floor(sc.y + scrR * sin(end) + 0.5));
+            CPoint scrStart((int)floor(sc.x + scrR * cos(start) + 0.5), (int)floor(sc.y - scrR * sin(start) + 0.5));
+            CPoint scrEnd((int)floor(sc.x + scrR * cos(end) + 0.5),   (int)floor(sc.y - scrR * sin(end) + 0.5));
             // draw with preview pen and sample the arc (Arc can be affected by ROP modes)
             pDC->MoveTo(sc); pDC->LineTo(scrStart);
             pDC->MoveTo(sc); pDC->LineTo(scrEnd);
@@ -1338,7 +1448,7 @@ void CLargeHWView::DrawPreview(CDC* pDC)
             int steps = max(12, (int)ceil(fabs(sweep) / (M_PI/36.0)));
             for (int k = 0; k <= steps; ++k) {
                 double ang = start + sweep * (double)k / (double)steps;
-                CPoint pp((int)floor(sc.x + scrR * cos(ang) + 0.5), (int)floor(sc.y + scrR * sin(ang) + 0.5));
+                CPoint pp((int)floor(sc.x + scrR * cos(ang) + 0.5), (int)floor(sc.y - scrR * sin(ang) + 0.5));
                 if (k == 0) pDC->MoveTo(pp); else pDC->LineTo(pp);
             }
         }
@@ -2057,6 +2167,12 @@ void CLargeHWView::CompleteDrawCommand()
     TRACE(L"[DEBUG] CompleteDrawCommand called\n");
     m_tempPts.clear();
     m_pActivePolyline = nullptr;
+    if (m_bDimRadiusSrcTemp) { delete m_pDimRadiusSrcEnt; m_bDimRadiusSrcTemp = false; }
+    m_pDimRadiusSrcEnt = nullptr;
+    if (m_bDimDiamSrcTemp) { delete m_pDimDiamSrcEnt; m_bDimDiamSrcTemp = false; }
+    m_pDimDiamSrcEnt = nullptr;
+    if (m_bDimArcLenSrcTemp) { delete m_pDimArcLenSrcEnt; m_bDimArcLenSrcTemp = false; }
+    m_pDimArcLenSrcEnt = nullptr;
     SetDrawState(STATE_IDLE);
 }
 
@@ -2275,6 +2391,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pR->m_bTextPlaced = true;
                 pR->m_bSelected = false;
                 m_pPendingDim = nullptr;
+                if (m_bDimRadiusSrcTemp) { delete m_pDimRadiusSrcEnt; m_bDimRadiusSrcTemp = false; }
                 m_pDimRadiusSrcEnt = nullptr;
                 pDoc->DeselectAll();
                 CompleteDrawCommand();
@@ -2283,6 +2400,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pD->m_bTextPlaced = true;
                 pD->m_bSelected = false;
                 m_pPendingDim = nullptr;
+                if (m_bDimDiamSrcTemp) { delete m_pDimDiamSrcEnt; m_bDimDiamSrcTemp = false; }
                 m_pDimDiamSrcEnt = nullptr;
                 pDoc->DeselectAll();
                 CompleteDrawCommand();
@@ -2291,6 +2409,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pAL->m_bTextPlaced = true;
                 pAL->m_bSelected = false;
                 m_pPendingDim = nullptr;
+                if (m_bDimArcLenSrcTemp) { delete m_pDimArcLenSrcEnt; m_bDimArcLenSrcTemp = false; }
                 m_pDimArcLenSrcEnt = nullptr;
                 pDoc->DeselectAll();
                 CompleteDrawCommand();
@@ -2398,10 +2517,6 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
 
 
     case STATE_DRAW_DIM_ANGLE_SELECT_E1: {
-        // When starting angle dimension selection, create temporary splits so subsequent
-        // selections operate on split segments. The temporary splits will be restored later.
-        m_tempSplitNewIDs.clear();
-        CreateTemporarySplits(pDoc, m_tempSplitNewIDs);
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
         TRACE(L"[DEBUG] STATE_DRAW_DIM_ANGLE_SELECT_E1: hit=%p\n", hit);
         if (hit) {
@@ -2532,8 +2647,9 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
             double x3 = b1.x, y3 = b1.y, x4 = b2.x, y4 = b2.y;
             double den = (x1 - x2)*(y3 - y4) - (y1 - y2)*(x3 - x4);
             if (fabs(den) < 1e-6) {
-                // parallel -> fallback to midpoints
-                center = MidPoint(a1, a2);
+                CPoint cp1 = ClosestPointOnSegment(a1, a2, b1);
+                CPoint cp2 = ClosestPointOnSegment(b1, b2, cp1);
+                center = MidPoint(cp1, cp2);
             } else {
                 double px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / den;
                 double py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / den;
@@ -2548,44 +2664,19 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
             else { CompleteDrawCommand(); break; }
         }
 
-        // Construct angular dim using clicked point as arc placement reference
-        // compute angles: use direction from center toward nearest points on each selected segment/line
-        double clickedA = atan2((double)(world.y - center.y), (double)(world.x - center.x));
-        double a1 = 0, a2 = 0;
-        if (auto l1p = dynamic_cast<CLineEntity*>(m_pDimEnt1)) {
-            CPoint cp = ClosestPointOnSegment(l1p->m_ptStart, l1p->m_ptEnd, center);
-            a1 = atan2((double)(cp.y - center.y), (double)(cp.x - center.x));
-        } else if (auto pl = dynamic_cast<CPolylineEntity*>(m_pDimEnt1Orig)) {
-            int idx = (m_nDimSegIndex1 >= 0) ? m_nDimSegIndex1 : 0;
-            CPoint s = pl->m_vertices[idx], e = pl->m_vertices[idx+1];
-            CPoint cp = ClosestPointOnSegment(s, e, center);
-            a1 = atan2((double)(cp.y - center.y), (double)(cp.x - center.x));
-        } else {
-            a1 = atan2((double)(pA.y - center.y), (double)(pA.x - center.x));
-        }
-        if (auto l2p = dynamic_cast<CLineEntity*>(m_pDimEnt2)) {
-            CPoint cp = ClosestPointOnSegment(l2p->m_ptStart, l2p->m_ptEnd, center);
-            a2 = atan2((double)(cp.y - center.y), (double)(cp.x - center.x));
-        } else if (auto pl = dynamic_cast<CPolylineEntity*>(m_pDimEnt2Orig)) {
-            int idx = (m_nDimSegIndex2 >= 0) ? m_nDimSegIndex2 : 0;
-            CPoint s = pl->m_vertices[idx], e = pl->m_vertices[idx+1];
-            CPoint cp = ClosestPointOnSegment(s, e, center);
-            a2 = atan2((double)(cp.y - center.y), (double)(cp.x - center.x));
-        } else {
-            a2 = atan2((double)(pB.y - center.y), (double)(pB.x - center.x));
-        }
-        // Use OA1/OA2/OB method suggested: compute midpoints A1/A2 for each selected segment
+        // Compute midpoints A1/A2 for each selected segment
         auto vec = [](CPoint a, CPoint b){ return CPoint(b.x - a.x, b.y - a.y); };
         auto dot = [](CPoint u, CPoint v){ return (double)u.x * v.x + (double)u.y * v.y; };
         auto len = [](CPoint u){ return sqrt((double)u.x*u.x + (double)u.y*u.y); };
+        auto normalize = [](double ang){ while (ang < 0) ang += 2*M_PI; while (ang >= 2*M_PI) ang -= 2*M_PI; return ang; };
 
         CPoint A1, A2;
-        if (auto l1p2 = dynamic_cast<CLineEntity*>(m_pDimEnt1)) A1 = MidPoint(l1p2->m_ptStart, l1p2->m_ptEnd);
+        if (auto le1 = dynamic_cast<CLineEntity*>(m_pDimEnt1)) A1 = MidPoint(le1->m_ptStart, le1->m_ptEnd);
         else if (auto pl = dynamic_cast<CPolylineEntity*>(m_pDimEnt1Orig)) {
             int idx = (m_nDimSegIndex1 >= 0) ? m_nDimSegIndex1 : 0;
             A1 = MidPoint(pl->m_vertices[idx], pl->m_vertices[idx+1]);
         } else A1 = pA;
-        if (auto l2p2 = dynamic_cast<CLineEntity*>(m_pDimEnt2)) A2 = MidPoint(l2p2->m_ptStart, l2p2->m_ptEnd);
+        if (auto le2 = dynamic_cast<CLineEntity*>(m_pDimEnt2)) A2 = MidPoint(le2->m_ptStart, le2->m_ptEnd);
         else if (auto pl = dynamic_cast<CPolylineEntity*>(m_pDimEnt2Orig)) {
             int idx = (m_nDimSegIndex2 >= 0) ? m_nDimSegIndex2 : 0;
             A2 = MidPoint(pl->m_vertices[idx], pl->m_vertices[idx+1]);
@@ -2610,7 +2701,6 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         // compute angular positions for A1/A2
         double angA1 = atan2((double)OA1.y, (double)OA1.x);
         double angA2 = atan2((double)OA2.y, (double)OA2.x);
-        auto normalize = [](double ang){ while (ang < 0) ang += 2*M_PI; while (ang >= 2*M_PI) ang -= 2*M_PI; return ang; };
         angA1 = normalize(angA1); angA2 = normalize(angA2);
 
         // determine explicit candidate arcs and pick according to isInner
@@ -2648,58 +2738,6 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         double rad = min(d1, d2);
         if (rad < 8.0) rad = max(8.0, min(20.0, max(d1, d2)));
         int r = (int)rad;
-        // Before creating the angular dimension, if the two selected entities are line segments,
-        // split them at their intersection point and add the split pieces as new line entities.
-        CLineEntity* line1 = dynamic_cast<CLineEntity*>(m_pDimEnt1);
-        CLineEntity* line2 = dynamic_cast<CLineEntity*>(m_pDimEnt2);
-        std::vector<int> createdIDs;
-        if (line1 && line2) {
-            double x1 = line1->m_ptStart.x, y1 = line1->m_ptStart.y;
-            double x2 = line1->m_ptEnd.x,   y2 = line1->m_ptEnd.y;
-            double x3 = line2->m_ptStart.x, y3 = line2->m_ptStart.y;
-            double x4 = line2->m_ptEnd.x,   y4 = line2->m_ptEnd.y;
-            double den = (x1 - x2)*(y3 - y4) - (y1 - y2)*(x3 - x4);
-            if (fabs(den) > 1e-6) {
-                double px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / den;
-                double py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / den;
-                CPoint ip((int)px, (int)py);
-                // check intersection lies within both segments (with small tolerance)
-                auto within = [](CPoint a, CPoint b, CPoint p){
-                    int minx = min(a.x, b.x) - 1; int maxx = max(a.x, b.x) + 1;
-                    int miny = min(a.y, b.y) - 1; int maxy = max(a.y, b.y) + 1;
-                    return (p.x >= minx && p.x <= maxx && p.y >= miny && p.y <= maxy);
-                };
-                if (within(line1->m_ptStart, line1->m_ptEnd, ip) && within(line2->m_ptStart, line2->m_ptEnd, ip)) {
-                    // create segments A1-O and O-A2 if non-zero length
-                    if (Distance(line1->m_ptStart, ip) > 1e-6) {
-                        CLineEntity* a = new CLineEntity(line1->m_ptStart, ip);
-                        pDoc->AddEntity(a);
-                        createdIDs.push_back(a->m_nID);
-                    }
-                    if (Distance(ip, line1->m_ptEnd) > 1e-6) {
-                        CLineEntity* b = new CLineEntity(ip, line1->m_ptEnd);
-                        pDoc->AddEntity(b);
-                        createdIDs.push_back(b->m_nID);
-                    }
-                    if (Distance(line2->m_ptStart, ip) > 1e-6) {
-                        CLineEntity* c = new CLineEntity(line2->m_ptStart, ip);
-                        pDoc->AddEntity(c);
-                        createdIDs.push_back(c->m_nID);
-                    }
-                    if (Distance(ip, line2->m_ptEnd) > 1e-6) {
-                        CLineEntity* d = new CLineEntity(ip, line2->m_ptEnd);
-                        pDoc->AddEntity(d);
-                        createdIDs.push_back(d->m_nID);
-                    }
-                    // deselect originals and select created pieces for highlighting
-                    pDoc->DeselectAll();
-                    for (int id : createdIDs) {
-                        for (auto* pe : pDoc->GetEntities()) if (pe->m_nID == id) pe->m_bSelected = true;
-                    }
-                }
-            }
-        }
-
         CPoint rp1((int)(center.x + r * cos(start)), (int)(center.y + r * sin(start)));
         CPoint rp2((int)(center.x + r * cos(end)),   (int)(center.y + r * sin(end)));
         // use 'world' (user click) as placement point and pass exact start/end angles
@@ -2720,12 +2758,39 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
         if (hit) {
             if (dynamic_cast<CCircleEntity*>(hit) || dynamic_cast<CArcEntity*>(hit)) {
+                if (m_bDimRadiusSrcTemp) { delete m_pDimRadiusSrcEnt; m_bDimRadiusSrcTemp = false; }
                 m_pDimRadiusSrcEnt = hit;
                 pDoc->DeselectAll();
                 hit->m_bSelected = true;
                 Invalidate(FALSE);
                 pDoc->m_strCommandPrompt = L"Specify leader line position: ";
                 SetDrawState(STATE_DRAW_DIM_RADIUS_POS);
+            } else if (auto pPoly = dynamic_cast<CPolylineEntity*>(hit)) {
+                CPoint center, ptStart, ptMid, ptEnd;
+                int radius, idxS, idxE;
+                if (DetectArcInPolyline(pPoly, point, pDoc->m_dScale, pDoc->m_ptOffset,
+                                        center, radius, ptStart, ptMid, ptEnd, idxS, idxE)) {
+                    if (m_bDimRadiusSrcTemp) delete m_pDimRadiusSrcEnt;
+                    double angS = atan2((double)(ptStart.y - center.y), (double)(ptStart.x - center.x));
+                    double angE = atan2((double)(ptEnd.y - center.y),   (double)(ptEnd.x - center.x));
+                    { double sw = angE - angS; while (sw > M_PI) sw -= 2.0*M_PI; while (sw < -M_PI) sw += 2.0*M_PI; if (sw < 0) { double t=angS; angS=angE; angE=t; } }
+                    CArcEntity* pTemp = new CArcEntity();
+                    pTemp->SetArcByCenter(center, radius, angS, angE);
+                    m_pDimRadiusSrcEnt = pTemp;
+                    m_bDimRadiusSrcTemp = true;
+                    pDoc->DeselectAll();
+                    Invalidate(FALSE);
+                    pDoc->m_strCommandPrompt = L"Specify leader line position: ";
+                    SetDrawState(STATE_DRAW_DIM_RADIUS_POS);
+                } else {
+                    pDoc->m_strCommandPrompt = L"Not a circle or arc. Select circle or arc: ";
+                    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+                    if (pFrame && pFrame->m_wndCmdLine.GetSafeHwnd()) {
+                        pFrame->m_wndCmdLine.SetWindowText(pDoc->m_strCommandPrompt);
+                        int nLen = pDoc->m_strCommandPrompt.GetLength();
+                        pFrame->m_wndCmdLine.SetSel(nLen, nLen);
+                    }
+                }
             } else {
                 pDoc->m_strCommandPrompt = L"Not a circle or arc. Select circle or arc: ";
                 CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
@@ -2762,6 +2827,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pDoc->AddEntity(pDim);
                 pDim->m_bSelected = true;
                 m_pPendingDim = pDim;
+                if (m_bDimRadiusSrcTemp) { delete m_pDimRadiusSrcEnt; m_bDimRadiusSrcTemp = false; }
                 m_pDimRadiusSrcEnt = nullptr;
                 pDoc->m_strCommandPrompt = L"Place dimension text: ";
                 SetDrawState(STATE_DRAW_TEXT_POS);
@@ -2776,12 +2842,39 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
         if (hit) {
             if (dynamic_cast<CCircleEntity*>(hit) || dynamic_cast<CArcEntity*>(hit)) {
+                if (m_bDimDiamSrcTemp) { delete m_pDimDiamSrcEnt; m_bDimDiamSrcTemp = false; }
                 m_pDimDiamSrcEnt = hit;
                 pDoc->DeselectAll();
                 hit->m_bSelected = true;
                 Invalidate(FALSE);
                 pDoc->m_strCommandPrompt = L"Specify diameter line position: ";
                 SetDrawState(STATE_DRAW_DIM_DIAMETER_POS);
+            } else if (auto pPoly = dynamic_cast<CPolylineEntity*>(hit)) {
+                CPoint center, ptStart, ptMid, ptEnd;
+                int radius, idxS, idxE;
+                if (DetectArcInPolyline(pPoly, point, pDoc->m_dScale, pDoc->m_ptOffset,
+                                        center, radius, ptStart, ptMid, ptEnd, idxS, idxE)) {
+                    if (m_bDimDiamSrcTemp) delete m_pDimDiamSrcEnt;
+                    double angS = atan2((double)(ptStart.y - center.y), (double)(ptStart.x - center.x));
+                    double angE = atan2((double)(ptEnd.y - center.y),   (double)(ptEnd.x - center.x));
+                    { double sw = angE - angS; while (sw > M_PI) sw -= 2.0*M_PI; while (sw < -M_PI) sw += 2.0*M_PI; if (sw < 0) { double t=angS; angS=angE; angE=t; } }
+                    CArcEntity* pTemp = new CArcEntity();
+                    pTemp->SetArcByCenter(center, radius, angS, angE);
+                    m_pDimDiamSrcEnt = pTemp;
+                    m_bDimDiamSrcTemp = true;
+                    pDoc->DeselectAll();
+                    Invalidate(FALSE);
+                    pDoc->m_strCommandPrompt = L"Specify diameter line position: ";
+                    SetDrawState(STATE_DRAW_DIM_DIAMETER_POS);
+                } else {
+                    pDoc->m_strCommandPrompt = L"Not a circle or arc. Select circle or arc: ";
+                    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+                    if (pFrame && pFrame->m_wndCmdLine.GetSafeHwnd()) {
+                        pFrame->m_wndCmdLine.SetWindowText(pDoc->m_strCommandPrompt);
+                        int nLen = pDoc->m_strCommandPrompt.GetLength();
+                        pFrame->m_wndCmdLine.SetSel(nLen, nLen);
+                    }
+                }
             } else {
                 pDoc->m_strCommandPrompt = L"Not a circle or arc. Select circle or arc: ";
                 CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
@@ -2812,6 +2905,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
                 pDoc->AddEntity(pDim);
                 pDim->m_bSelected = true;
                 m_pPendingDim = pDim;
+                if (m_bDimDiamSrcTemp) { delete m_pDimDiamSrcEnt; m_bDimDiamSrcTemp = false; }
                 m_pDimDiamSrcEnt = nullptr;
                 pDoc->m_strCommandPrompt = L"Place dimension text: ";
                 SetDrawState(STATE_DRAW_TEXT_POS);
@@ -2826,12 +2920,39 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
         if (hit) {
             if (dynamic_cast<CArcEntity*>(hit)) {
+                if (m_bDimArcLenSrcTemp) { delete m_pDimArcLenSrcEnt; m_bDimArcLenSrcTemp = false; }
                 m_pDimArcLenSrcEnt = hit;
                 pDoc->DeselectAll();
                 hit->m_bSelected = true;
                 Invalidate(FALSE);
                 pDoc->m_strCommandPrompt = L"Specify dimension arc position: ";
                 SetDrawState(STATE_DRAW_DIM_ARCLEN_POS);
+            } else if (auto pPoly = dynamic_cast<CPolylineEntity*>(hit)) {
+                CPoint center, ptStart, ptMid, ptEnd;
+                int radius, idxS, idxE;
+                if (DetectArcInPolyline(pPoly, point, pDoc->m_dScale, pDoc->m_ptOffset,
+                                        center, radius, ptStart, ptMid, ptEnd, idxS, idxE)) {
+                    if (m_bDimArcLenSrcTemp) delete m_pDimArcLenSrcEnt;
+                    double angS = atan2((double)(ptStart.y - center.y), (double)(ptStart.x - center.x));
+                    double angE = atan2((double)(ptEnd.y - center.y),   (double)(ptEnd.x - center.x));
+                    { double sw = angE - angS; while (sw > M_PI) sw -= 2.0*M_PI; while (sw < -M_PI) sw += 2.0*M_PI; if (sw < 0) { double t=angS; angS=angE; angE=t; } }
+                    CArcEntity* pTemp = new CArcEntity();
+                    pTemp->SetArcByCenter(center, radius, angS, angE);
+                    m_pDimArcLenSrcEnt = pTemp;
+                    m_bDimArcLenSrcTemp = true;
+                    pDoc->DeselectAll();
+                    Invalidate(FALSE);
+                    pDoc->m_strCommandPrompt = L"Specify dimension arc position: ";
+                    SetDrawState(STATE_DRAW_DIM_ARCLEN_POS);
+                } else {
+                    pDoc->m_strCommandPrompt = L"Not a arc. Select arc: ";
+                    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+                    if (pFrame && pFrame->m_wndCmdLine.GetSafeHwnd()) {
+                        pFrame->m_wndCmdLine.SetWindowText(pDoc->m_strCommandPrompt);
+                        int nLen = pDoc->m_strCommandPrompt.GetLength();
+                        pFrame->m_wndCmdLine.SetSel(nLen, nLen);
+                    }
+                }
             } else {
                 pDoc->m_strCommandPrompt = L"Not a arc. Select arc: ";
                 CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
@@ -2879,6 +3000,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
             pDoc->AddEntity(pDim);
             pDim->m_bSelected = true;
             m_pPendingDim = pDim;
+            if (m_bDimArcLenSrcTemp) { delete m_pDimArcLenSrcEnt; m_bDimArcLenSrcTemp = false; }
             m_pDimArcLenSrcEnt = nullptr;
             pDoc->m_strCommandPrompt = L"Place dimension text: ";
             SetDrawState(STATE_DRAW_TEXT_POS);
@@ -3673,6 +3795,84 @@ void CLargeHWView::OnDrawDimLength()  { OnDrawDimLengthAligned(); }
 void CLargeHWView::OnDrawDimLengthAligned() { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 0; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
 void CLargeHWView::OnDrawDimLengthHoriz() { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 1; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
 void CLargeHWView::OnDrawDimLengthVert()  { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 2; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
+
+void CLargeHWView::OnDrawDimAngle()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_DRAW_DIMENSION_ANGLE;
+    m_pDimEnt1 = nullptr; m_pDimEnt2 = nullptr;
+    // create temporary split segments up-front so user can click/select split pieces immediately
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        // if there are old temp splits, remove them first
+        if (!m_tempSplitNewIDs.empty()) {
+            RestoreTemporarySplits(pDoc, m_tempSplitNewIDs);
+            m_tempSplitNewIDs.clear();
+        }
+        // create temporary split segments but do NOT select them; selection should occur on user clicks
+        CreateTemporarySplits(pDoc, m_tempSplitNewIDs);
+    }
+    SetDrawState(STATE_DRAW_DIM_ANGLE_SELECT_E1);
+}
+
+void CLargeHWView::OnDrawDimRadius()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_DRAW_DIMENSION_RADIUS;
+    if (m_bDimRadiusSrcTemp) { delete m_pDimRadiusSrcEnt; m_bDimRadiusSrcTemp = false; }
+    m_pDimRadiusSrcEnt = nullptr;
+    m_pPendingDim = nullptr;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt = L"Select circle or arc: ";
+    }
+    SetDrawState(STATE_DRAW_DIM_RADIUS_SELECT);
+}
+
+void CLargeHWView::OnDrawDimDiameter()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_DRAW_DIMENSION_DIAMETER;
+    if (m_bDimDiamSrcTemp) { delete m_pDimDiamSrcEnt; m_bDimDiamSrcTemp = false; }
+    m_pDimDiamSrcEnt = nullptr;
+    m_pPendingDim = nullptr;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt = L"Select circle or arc: ";
+    }
+    SetDrawState(STATE_DRAW_DIM_DIAMETER_SELECT);
+}
+
+void CLargeHWView::OnDrawDimArcLength()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_DRAW_DIMENSION_ARCLENGTH;
+    if (m_bDimArcLenSrcTemp) { delete m_pDimArcLenSrcEnt; m_bDimArcLenSrcTemp = false; }
+    m_pDimArcLenSrcEnt = nullptr;
+    m_pPendingDim = nullptr;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt = L"Select arc: ";
+    }
+    SetDrawState(STATE_DRAW_DIM_ARCLEN_SELECT);
+}
+
+void CLargeHWView::OnDrawDimCoordinate()
+{
+    m_tempPts.clear();
+    m_nLastCommandID = ID_DRAW_DIMENSION_COORDINATE;
+    m_bCoordDimMode = true;
+    m_ptCoordPoint = CPoint(0, 0);
+    m_pPendingDim = nullptr;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc) {
+        pDoc->m_strCommandPrompt = L"Specify point: ";
+    }
+    SetDrawState(STATE_DRAW_DIM_COORD_PICK);
+}
 
 // ============================================================
 // Modify command handlers

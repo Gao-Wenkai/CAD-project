@@ -256,8 +256,8 @@ void CDimAngularEntity::Draw(CDC* pDC, double scale, CPoint offset)
 	// After possibly swapping start/end above, compute ray endpoints from those final angles
 	double ux_s = cos(start), uy_s = sin(start);
 	double ux_e = cos(end),   uy_e = sin(end);
-	CPoint ps((int)floor(sc.x + r * ux_s + 0.5), (int)floor(sc.y + r * uy_s + 0.5));
-	CPoint pe((int)floor(sc.x + r * ux_e + 0.5), (int)floor(sc.y + r * uy_e + 0.5));
+	CPoint ps((int)floor(sc.x + r * ux_s + 0.5), (int)floor(sc.y - r * uy_s + 0.5));
+	CPoint pe((int)floor(sc.x + r * ux_e + 0.5), (int)floor(sc.y - r * uy_e + 0.5));
 	// draw the two rays using final angles so they precisely align with the arc endpoints
 	pDC->MoveTo(sc); pDC->LineTo(ps);
 	pDC->MoveTo(sc); pDC->LineTo(pe);
@@ -271,7 +271,7 @@ void CDimAngularEntity::Draw(CDC* pDC, double scale, CPoint offset)
 			double ang = start + sweep * (double)i / (double)steps;
 			// normalize ang to avoid drift
 			while (ang < 0) ang += 2*M_PI; while (ang >= 2*M_PI) ang -= 2*M_PI;
-			CPoint p((int)floor(sc.x + r * cos(ang) + 0.5), (int)floor(sc.y + r * sin(ang) + 0.5));
+			CPoint p((int)floor(sc.x + r * cos(ang) + 0.5), (int)floor(sc.y - r * sin(ang) + 0.5));
 			if (i == 0) pDC->MoveTo(p);
 			else pDC->LineTo(p);
 		}
@@ -295,7 +295,7 @@ void CDimAngularEntity::Draw(CDC* pDC, double scale, CPoint offset)
 		// outer (long) arc: place text clearly outside the arc radius
 		textR = r + max(minOuter, r * 0.45);
 	}
-	CPoint txtPt((int)(sc.x + textR * cos(mid)), (int)(sc.y + textR * sin(mid)));
+	CPoint txtPt((int)(sc.x + textR * cos(mid)), (int)(sc.y - textR * sin(mid)));
 	if (!(m_ptText.x == 0 && m_ptText.y == 0)) {
 		txtPt = ToScreen(m_ptText, scale, offset);
 	}
@@ -538,25 +538,6 @@ void CDimArcLengthEntity::Draw(CDC* pDC, double scale, CPoint offset)
 	// Draw dimension arc using Arc() for exact consistency with original arc drawing
 	CRect rcEllipse(sc.x - sr, sc.y - sr, sc.x + sr, sc.y + sr);
 	pDC->Arc(rcEllipse, sDS, sDE);
-
-	// Draw arrowheads at arc endpoints (tangent to arc)
-	int arrowLen = max(8, (int)(8 * scale));
-	auto drawArcArrow = [&](CPoint screenPt, double angle, bool atStart) {
-		double sweepDir = m_dSweep > 0 ? 1.0 : -1.0;
-		double tangentAng;
-		if (atStart)
-			tangentAng = angle + M_PI/2.0 * sweepDir - M_PI;
-		else
-			tangentAng = angle + M_PI/2.0 * sweepDir;
-		double a1 = tangentAng + M_PI * 3.0 / 8.0;
-		double a2 = tangentAng - M_PI * 3.0 / 8.0;
-		CPoint p1((int)floor(screenPt.x + cos(a1) * arrowLen + 0.5), (int)floor(screenPt.y + sin(a1) * arrowLen + 0.5));
-		CPoint p2((int)floor(screenPt.x + cos(a2) * arrowLen + 0.5), (int)floor(screenPt.y + sin(a2) * arrowLen + 0.5));
-		pDC->MoveTo(screenPt); pDC->LineTo(p1);
-		pDC->MoveTo(screenPt); pDC->LineTo(p2);
-	};
-	drawArcArrow(sDS, m_dStartAngle, true);
-	drawArcArrow(sDE, m_dEndAngle, false);
 
 	// Draw text
 	double arcLen = (double)m_nArcRadius * fabs(m_dSweep);

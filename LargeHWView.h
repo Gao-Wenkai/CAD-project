@@ -51,6 +51,9 @@ public:
     CEntity*            m_pDimRadiusSrcEnt; // The circle/arc selected for radius dim
     CEntity*            m_pDimDiamSrcEnt;   // The circle/arc selected for diameter dim
     CEntity*            m_pDimArcLenSrcEnt;  // The arc selected for arc length dim
+    bool                m_bDimRadiusSrcTemp; // whether m_pDimRadiusSrcEnt is a temp CArcEntity from polyline
+    bool                m_bDimDiamSrcTemp;   // whether m_pDimDiamSrcEnt is a temp CArcEntity from polyline
+    bool                m_bDimArcLenSrcTemp; // whether m_pDimArcLenSrcEnt is a temp CArcEntity from polyline
     bool                m_bCoordDimMode;       // true during coordinate dimension command
     CPoint              m_ptCoordPoint;         // the point picked for coordinate dim
     // when entering STATE_DRAW_DIM_ANGLE_POS, ignore the immediate leftover click once
