@@ -7,6 +7,7 @@
 #endif
 
 #include "LargeHWDoc.h"
+#include "Dimension.h"
 #include <propkey.h>
 
 #ifdef _DEBUG
@@ -660,6 +661,9 @@ void CLargeHWDoc::Serialize(CArchive& ar)
             case ENT_ELLIPSE:   pEntity = new CEllipseEntity(); break;
             case ENT_POLYLINE:  pEntity = new CPolylineEntity(); break;
             case ENT_TEXT:      pEntity = new CTextEntity(); break;
+            case ENT_DIM_RADIUS:pEntity = new CDimRadiusEntity(); break;
+            case ENT_DIM_DIAMETER:pEntity = new CDimDiamEntity(); break;
+            case ENT_DIM_ARCLENGTH:pEntity = new CDimArcLengthEntity(); break;
             case ENT_POINT:     pEntity = new CPointEntity(); break;
             default: continue;
             }
