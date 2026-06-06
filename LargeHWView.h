@@ -25,6 +25,28 @@ public:
     int                 m_nPolygonSides;
     bool                m_bArcAltHalf;      // Arc: toggle alternate half
     bool                m_bPolylineClose;   // PL: C key toggles close back to start
+    // For angular dimension selection: hold selected line entities
+    CEntity*            m_pDimEnt1;
+    CEntity*            m_pDimEnt2;
+    // Pending created dimension entity that awaits text placement
+    CEntity*            m_pPendingDim;
+    // If selecting a segment from a polyline, store original and index
+    CEntity*            m_pDimEnt1Orig;
+    CEntity*            m_pDimEnt2Orig;
+    int                 m_nDimSegIndex1;
+    int                 m_nDimSegIndex2;
+    bool                m_bDimEnt1Temp;
+    bool                m_bDimEnt2Temp;
+    CEntity*            m_pDimRadiusSrcEnt; // The circle/arc selected for radius dim
+    CEntity*            m_pDimDiamSrcEnt;   // The circle/arc selected for diameter dim
+    CEntity*            m_pDimArcLenSrcEnt;  // The arc selected for arc length dim
+    bool                m_bCoordDimMode;       // true during coordinate dimension command
+    CPoint              m_ptCoordPoint;         // the point picked for coordinate dim
+    // when entering STATE_DRAW_DIM_ANGLE_POS, ignore the immediate leftover click once
+    bool                m_bJustEnteredAnglePos;
+
+    // Temporary split state for angle-dimension command
+    std::vector<int>    m_tempSplitNewIDs;                // IDs of temporary created split segments
 
     // Pan state
     bool                m_bPanning;
@@ -38,6 +60,7 @@ public:
 
     // Last command tracking
     UINT                m_nLastCommandID;
+    int                 m_nLastDimMode; // 0=aligned,1=horizontal,2=vertical
 
     COLORREF            m_currentColor;
     int                 m_currentLineStyle;
@@ -68,6 +91,15 @@ public:
     afx_msg void OnDrawPolygon();
     afx_msg void OnDrawEllipse();
     afx_msg void OnDrawText();
+    afx_msg void OnDrawDimLength();
+    afx_msg void OnDrawDimLengthAligned();
+    afx_msg void OnDrawDimLengthHoriz();
+    afx_msg void OnDrawDimLengthVert();
+    afx_msg void OnDrawDimAngle();
+    afx_msg void OnDrawDimRadius();
+    afx_msg void OnDrawDimDiameter();
+    afx_msg void OnDrawDimArcLength();
+    afx_msg void OnDrawDimCoordinate();
 
     // Modify commands
     afx_msg void OnModifyMove();

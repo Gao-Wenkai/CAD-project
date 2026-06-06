@@ -77,6 +77,19 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         drawMenu.AppendMenu(MF_STRING, ID_DRAW_POLYGON,   L"P&olygon");
         drawMenu.AppendMenu(MF_STRING, ID_DRAW_ELLIPSE,   L"&Ellipse");
         drawMenu.AppendMenu(MF_STRING, ID_DRAW_TEXT,      L"&Text");
+        drawMenu.AppendMenu(MF_SEPARATOR);
+        // Dimension submenu under Draw
+        CMenu dimLengthMenu;
+        dimLengthMenu.CreatePopupMenu();
+        dimLengthMenu.AppendMenu(MF_STRING, ID_DRAW_DIM_LENGTH_ALIGNED, L"&Aligned");
+        dimLengthMenu.AppendMenu(MF_STRING, ID_DRAW_DIM_LENGTH_HORIZ,   L"&Horizontal");
+        dimLengthMenu.AppendMenu(MF_STRING, ID_DRAW_DIM_LENGTH_VERT,    L"&Vertical");
+        drawMenu.AppendMenu(MF_POPUP, (UINT_PTR)dimLengthMenu.Detach(), L"Dim-&Length");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_DIMENSION_ANGLE,  L"Dim-&Angle");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_DIMENSION_RADIUS, L"Dim-&Radius");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_DIMENSION_DIAMETER, L"Dim-&Diameter");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_DIMENSION_ARCLENGTH, L"Dim-&ArcLen");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_DIMENSION_COORDINATE, L"Dim-&Coordinate");
         pMenu->InsertMenu(2, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)drawMenu.Detach(), L"&Draw");
 
@@ -99,6 +112,7 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         formatMenu.AppendMenu(MF_STRING, ID_FORMAT_LAYER,    L"&Layer...");
         pMenu->InsertMenu(4, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)formatMenu.Detach(), L"F&ormat");
+
     }
 
     // 2. Command line (bottom of window) - AutoCAD-style

@@ -17,6 +17,17 @@
 #define ID_DRAW_POLYGON                 1006
 #define ID_DRAW_ELLIPSE                 1007
 #define ID_DRAW_TEXT                    1008
+#define ID_DRAW_DIMENSION_LENGTH        1009
+#define ID_DRAW_DIMENSION_ANGLE         1010
+// Radius dimension
+#define ID_DRAW_DIMENSION_RADIUS        1014
+#define ID_DRAW_DIMENSION_DIAMETER      1015
+#define ID_DRAW_DIMENSION_ARCLENGTH     1016
+#define ID_DRAW_DIMENSION_COORDINATE    1017
+// Split linear dimension into three modes
+#define ID_DRAW_DIM_LENGTH_ALIGNED      1011
+#define ID_DRAW_DIM_LENGTH_HORIZ        1012
+#define ID_DRAW_DIM_LENGTH_VERT         1013
 
 #define ID_MODIFY_MOVE                  1101
 #define ID_MODIFY_COPY                  1102

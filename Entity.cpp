@@ -89,7 +89,6 @@ int CEntity::HitTestGrip(CPoint pt, double scale, CPoint offset)
 }
 
 // ===========================================================
-
 // ===========================================================
 IMPLEMENT_SERIAL(CLineEntity, CEntity, 1)
 
@@ -110,14 +109,14 @@ void CLineEntity::Draw(CDC* pDC, double scale, CPoint offset)
 
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
-        pDC->SelectObject(&selPen);
-        CRect rc = GetBounds();
-        CRect rcScreen = ToScreenRect(rc, scale, offset);
-        rcScreen.InflateRect(4, 4);
-        pDC->DrawFocusRect(rcScreen);
+        // draw a thicker overlay line to indicate selection
+        CPen selPen(PS_SOLID, max(2, m_nLineWidth + 2), RGB(0, 255, 255));
+        CPen* pPrev = pDC->SelectObject(&selPen);
+        pDC->MoveTo(p1);
+        pDC->LineTo(p2);
+        pDC->SelectObject(pPrev);
 
-
+        // keep grips visible
         CBrush gripBrush(RGB(0, 128, 255));
         CBrush* pOldBrush = pDC->SelectObject(&gripBrush);
         for (int i = 0; i < GetGripCount(); ++i) {
@@ -212,12 +211,12 @@ void CCircleEntity::Draw(CDC* pDC, double scale, CPoint offset)
     pDC->Ellipse(c.x - r, c.y - r, c.x + r, c.y + r);
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
-        pDC->SelectObject(&selPen);
-        CRect rc = GetBounds();
-        CRect rcScreen = ToScreenRect(rc, scale, offset);
-        rcScreen.InflateRect(4, 4);
-        pDC->DrawFocusRect(rcScreen);
+        // draw thicker overlay circle to indicate selection instead of focus rect
+        CPen selPen(PS_SOLID, max(2, m_nLineWidth + 2), RGB(0, 255, 255));
+        CPen* pOldSel = pDC->SelectObject(&selPen);
+        pDC->SelectStockObject(NULL_BRUSH);
+        pDC->Ellipse(c.x - r, c.y - r, c.x + r, c.y + r);
+        pDC->SelectObject(pOldSel);
 
         CBrush gripBrush(RGB(0, 128, 255));
         pDC->SelectObject(&gripBrush);
@@ -624,11 +623,18 @@ void CPolygonEntity::Draw(CDC* pDC, double scale, CPoint offset)
     }
 
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
-        pDC->SelectObject(&selPen);
-        CRect rc = ToScreenRect(GetBounds(), scale, offset);
-        rc.InflateRect(4, 4);
-        pDC->DrawFocusRect(rc);
+        // draw thicker overlay for polygon
+        std::vector<CPoint> verts2;
+        GetVertices(verts2);
+        if (!verts2.empty()) {
+            CPen selPen(PS_SOLID, max(2, m_nLineWidth + 2), RGB(0, 255, 255));
+            CPen* pOldSel = pDC->SelectObject(&selPen);
+            pDC->MoveTo(ToScreen(verts2[0], scale, offset));
+            for (int i = 1; i < (int)verts2.size(); ++i)
+                pDC->LineTo(ToScreen(verts2[i], scale, offset));
+            if (m_nSides > 2) pDC->LineTo(ToScreen(verts2[0], scale, offset));
+            pDC->SelectObject(pOldSel);
+        }
     }
     pDC->SelectObject(pOldPen);
     pDC->SelectObject(pOldBrush);
@@ -836,13 +842,14 @@ void CPolylineEntity::Draw(CDC* pDC, double scale, CPoint offset)
 
     if (m_bClosed && n > 2)
         pDC->LineTo(ToScreen(m_vertices[0], scale, offset));
-
     if (m_bSelected) {
-        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
-        pDC->SelectObject(&selPen);
-        CRect rc = ToScreenRect(GetBounds(), scale, offset);
-        rc.InflateRect(4, 4);
-        pDC->DrawFocusRect(rc);
+        // draw thicker overlay for polyline
+        CPen selPen(PS_SOLID, max(2, m_nLineWidth + 2), RGB(0, 255, 255));
+        CPen* pOldPen2 = pDC->SelectObject(&selPen);
+        pDC->MoveTo(ToScreen(m_vertices[0], scale, offset));
+        for (int i = 1; i < n; ++i) pDC->LineTo(ToScreen(m_vertices[i], scale, offset));
+        if (m_bClosed && n > 2) pDC->LineTo(ToScreen(m_vertices[0], scale, offset));
+        pDC->SelectObject(pOldPen2);
 
         CBrush gripBrush(RGB(0, 128, 255));
         CBrush* pOldBrush = pDC->SelectObject(&gripBrush);
@@ -1054,6 +1061,11 @@ void CTextEntity::Mirror(CPoint p1, CPoint p2) {
 void CTextEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const {
     points.push_back(m_ptPosition); types.push_back(SNAP_NEAREST);
 }
+
+// ===========================================================
+// Linear dimension
+// ===========================================================
+// Linear and angular dimension implementations moved to Dimension.cpp
 
 // ===========================================================
 

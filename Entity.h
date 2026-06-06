@@ -24,7 +24,10 @@ enum EntityType {
     ENT_POLYGON,
     ENT_ELLIPSE,
     ENT_POLYLINE,
-    ENT_TEXT
+    ENT_TEXT,
+    ENT_DIM_RADIUS,
+    ENT_DIM_DIAMETER,
+    ENT_DIM_ARCLENGTH
 };
 
 // Drawing interaction state -- simulates AutoCAD command-line prompt flow
@@ -66,6 +69,23 @@ enum CadDrawState {
     STATE_OFFSET_DIST,
     STATE_ZOOM_WINDOW_P1,
     STATE_ZOOM_WINDOW_P2,
+    STATE_DRAW_DIM_LENGTH_P1,
+    STATE_DRAW_DIM_LENGTH_P2,
+    STATE_DRAW_DIM_LENGTH_POS,
+    STATE_DRAW_DIM_RADIUS_SELECT,
+    STATE_DRAW_DIM_RADIUS_POS,
+    STATE_DRAW_DIM_ANGLE_SELECT_E1,
+    STATE_DRAW_DIM_ANGLE_SELECT_E2,
+    STATE_DRAW_DIM_ANGLE_POS,
+    STATE_DRAW_DIM_DIAMETER_SELECT,
+    STATE_DRAW_DIM_DIAMETER_POS,
+    STATE_DRAW_DIM_ARCLEN_SELECT,
+    STATE_DRAW_DIM_ARCLEN_POS,
+    STATE_DRAW_DIM_COORD_PICK,
+    // Backwards-compatible aliases for older state names
+    STATE_DRAW_DIM_ANGLE_CENTER = STATE_DRAW_DIM_ANGLE_SELECT_E1,
+    STATE_DRAW_DIM_ANGLE_P1     = STATE_DRAW_DIM_ANGLE_SELECT_E2,
+    STATE_DRAW_DIM_ANGLE_P2     = STATE_DRAW_DIM_ANGLE_POS,
 };
 
 // Object snap type
@@ -79,6 +99,8 @@ enum SnapType {
     SNAP_NEAREST,
     SNAP_GRID
 };
+
+// dimension entity declarations moved below (after CTextEntity)
 
 // -----------------------------------------------------------
 // CEntity -- abstract base class for all entities
@@ -151,6 +173,8 @@ public:
     virtual void   SetGrip(int index, CPoint pt) override;
     virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
+
+// Dimension entities declared in Dimension.h
 
 // -----------------------------------------------------------
 // CCircleEntity -- Circle
