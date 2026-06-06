@@ -119,6 +119,9 @@ CWinApp (CLargeHWApp)
 | `SNAP` / `F9` | 切换吸附 |
 | `ORTHO` / `F8` | 切换正交 |
 | `OSNAP` / `F3` | 切换对象捕捉 |
+| `SCR` / `SCRIPT` | 读取并执行 SCR 脚本 |
+| `SCRREC` / `SCRIPTREC` | 开始录制 SCR 脚本 |
+| `SCRSTOP` / `SCRIPTSTOP` | 停止录制 SCR 脚本 |
 
 ### 6. 坐标输入
 
@@ -175,6 +178,16 @@ L [Enter]              → 启动 LINE 命令
 - **线型** — 实线、虚线、点线、点划线
 - **线宽** — 4 级粗细 (1–4)
 
+### 12. SCR 脚本录制与读取
+
+- 通过 脚本 > 开始录制 / 停止录制 / 运行脚本 菜单管理 `.scr` 文件
+- `SCRREC` / `SCRIPTREC` / `RECORDSCRIPT` 录制后续命令行输入、菜单命令和鼠标拾取坐标
+- `SCRSTOP` / `SCRIPTSTOP` / `STOPSCRIPT` 关闭当前录制文件
+- `SCR` / `SCRIPT` 读取 `.scr` 文件，并复用现有命令行解析与坐标输入流程执行
+- 脚本采用逐行命令格式，空行表示 Enter，可用于结束多段线或确认圆弧
+- 支持 `;` / `#` 注释，以及 `TEXT x,y height "content"` 形式的文字脚本输入
+- 读取端兼容常见 AutoCAD 前缀（如 `_.LINE`），并支持直线、圆、圆弧、多段线、矩形、椭圆、正多边形、点、文字、图层、颜色、线型、线宽和显示开关等脚本命令
+
 ---
 
 ## 构建说明
@@ -201,3 +214,19 @@ msbuild LargeHW.sln /p:Configuration=Debug /p:Platform=x64
 | `F7` | 切换网格显示 |
 | `F8` | 切换正交模式 |
 | `F9` | 切换吸附网格 |
+
+## Current Command Additions
+
+| Command | Alias | Steps |
+|------|------|------|
+| `CHAMFER` | `CHA` | Select first `LINE` -> optionally enter distance -> select second `LINE`. |
+| `ARRAY` / `ARRAYRECT` | `AR` | Select objects -> rows -> columns -> row spacing -> column spacing. |
+| `ZOOM E` | `ZE` / `ZOOME` / `Z` then `E` | Zoom extents, fitting all visible entities. |
+
+SCR/direct command forms:
+
+```scr
+ARRAY ALL 3 4 100 200
+CHAMFER 20
+ZOOM E
+```

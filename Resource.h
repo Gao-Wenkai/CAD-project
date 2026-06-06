@@ -36,6 +36,9 @@
 #define ID_MODIFY_DELETE                1105
 #define ID_MODIFY_MIRROR                1106
 #define ID_MODIFY_OFFSET                1107
+#define ID_MODIFY_CHAMFER               1108
+#define ID_MODIFY_ARRAY                 1109
+#define ID_MODIFY_FILLET                1110
 
 #define ID_CAD_UNDO                    1201
 #define ID_CAD_REDO                    1202
@@ -49,6 +52,10 @@
 #define ID_VIEW_ORTHO                   1306
 
 #define ID_FORMAT_LAYER                 1501
+
+#define ID_SCRIPT_RUN                   1601
+#define ID_SCRIPT_RECORD_START          1602
+#define ID_SCRIPT_RECORD_STOP           1603
 
 #define ID_PROP_COLOR                   1401
 #define ID_PROP_LINETYPE                1402

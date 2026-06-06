@@ -12,6 +12,17 @@ protected:
     DECLARE_DYNCREATE(CLargeHWView)
 
 public:
+    struct ChamferSegmentRef
+    {
+        CEntity* pEntity;
+        int      segmentIndex;
+        CPoint   start;
+        CPoint   end;
+
+        ChamferSegmentRef() : pEntity(nullptr), segmentIndex(-1), start(0, 0), end(0, 0) {}
+        bool IsValid() const { return pEntity != nullptr && segmentIndex >= 0; }
+    };
+
     CLargeHWDoc* GetDocument() const;
 
     // Drawing state (temporary interaction data)
@@ -47,6 +58,21 @@ public:
 
     // Temporary split state for angle-dimension command
     std::vector<int>    m_tempSplitNewIDs;                // IDs of temporary created split segments
+    // Polyline / chamfer / fillet / array
+    bool                m_bPolylineArcMode;
+    int                 m_nPolylineWidth;
+    int                 m_nPolylineStartWidth;
+    int                 m_nPolylineEndWidth;
+    CPolylineEntity*    m_pActivePolyline;
+    CLineEntity*        m_pChamferFirst;
+    ChamferSegmentRef   m_chamferFirstSegment;
+    double              m_dChamferDistance;
+    ChamferSegmentRef   m_filletFirstSegment;
+    double              m_dFilletRadius;
+    int                 m_nArrayRows;
+    int                 m_nArrayColumns;
+    double              m_dArrayRowSpacing;
+    double              m_dArrayColumnSpacing;
 
     // Pan state
     bool                m_bPanning;
@@ -109,6 +135,9 @@ public:
     afx_msg void OnModifyDelete();
     afx_msg void OnModifyMirror();
     afx_msg void OnModifyOffset();
+    afx_msg void OnModifyChamfer();
+    afx_msg void OnModifyFillet();
+    afx_msg void OnModifyArray();
 
     // Edit commands
     afx_msg void OnEditUndo();
@@ -147,6 +176,14 @@ public:
     afx_msg void OnCancelCommand();
     afx_msg void OnFormatLayer();
 
+    // SCR script commands
+    afx_msg void OnScriptRun();
+    afx_msg void OnScriptRecordStart();
+    afx_msg void OnScriptRecordStop();
+    afx_msg void OnUpdateScriptRun(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateScriptRecordStart(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateScriptRecordStop(CCmdUI* pCmdUI);
+
 protected:
     virtual BOOL OnPreparePrinting(CPrintInfo* pInfo);
     virtual void OnBeginPrinting(CDC* pDC, CPrintInfo* pInfo);
@@ -154,6 +191,7 @@ protected:
 
 public:
     virtual ~CLargeHWView();
+    void SubmitCommandLineInput(const CString& strInput, bool bRecord = true);
     void ExecuteCommand(const CString& strCmd);
     void ProcessCoordinateInput(const CString& strInput);
     CPoint ParseCoordinate(const CString& str, CPoint ref) const;
@@ -180,6 +218,35 @@ protected:
     void    SetDrawState(CadDrawState state);
     void    CompleteDrawCommand();
     void    RepeatLastCommand();
+    CLineEntity* HitTestLineEntity(CPoint point) const;
+    ChamferSegmentRef HitTestChamferSegment(CPoint point) const;
+    bool    ApplyChamfer(CLineEntity* pFirst, CLineEntity* pSecond, double distance);
+    bool    ApplyChamfer(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double distance);
+    bool    ApplyFillet(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double radius);
+    bool    UpdateArrayDefaultSpacingFromSelection();
+    void    CreateRectangularArray(int rows, int columns, double rowSpacing, double columnSpacing);
+    bool    ProcessArrayParameterInput(const CString& strInput);
+    bool    CloseLineCommand();
+    bool    FinishPolylineCommand(bool close);
+    void    AddPolylinePoint(CPoint world);
+    void    RecordScriptInput(const CString& strInput);
+    bool    IsCoordinateInput(const CString& strInput) const;
+    bool    ExecuteScriptFile(const CString& strPath);
+    void    ExecuteScriptLine(const CString& strLine);
+    bool    ExecuteDirectScriptCommand(const CString& strLine);
+    void    TokenizeScriptLine(const CString& strLine, std::vector<CString>& tokens) const;
+    CString StripScriptComment(const CString& strLine) const;
+    CString FormatScriptPoint(CPoint pt) const;
+    CString EscapeScriptText(const CString& strText) const;
+    void    SyncCommandLinePrompt();
+    bool    ShouldRecordPointForState(CadDrawState state) const;
+
+    bool    m_bScriptRecording;
+    bool    m_bRunningScript;
+    bool    m_bSubmittingCommandLine;
+    double  m_dScriptCoordinateScale;
+    CString m_strScriptRecordPath;
+    CFile   m_scriptRecordFile;
 
     DECLARE_MESSAGE_MAP()
 };

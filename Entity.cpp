@@ -59,21 +59,23 @@ void CEntity::Serialize(CArchive& ar)
 CPoint CEntity::ToWorld(CPoint screen, double scale, CPoint offset) const
 {
     return CPoint((int)((screen.x - offset.x) / scale),
-                  (int)((screen.y - offset.y) / scale));
+                  (int)((offset.y - screen.y) / scale));
 }
 
 CPoint CEntity::ToScreen(CPoint world, double scale, CPoint offset) const
 {
     return CPoint((int)(world.x * scale + offset.x),
-                  (int)(world.y * scale + offset.y));
+                  (int)(offset.y - world.y * scale));
 }
 
 CRect CEntity::ToScreenRect(CRect world, double scale, CPoint offset) const
 {
-    return CRect((int)(world.left * scale + offset.x),
-                 (int)(world.top * scale + offset.y),
-                 (int)(world.right * scale + offset.x),
-                 (int)(world.bottom * scale + offset.y));
+    CRect rc((int)(world.left * scale + offset.x),
+             (int)(offset.y - world.top * scale),
+             (int)(world.right * scale + offset.x),
+             (int)(offset.y - world.bottom * scale));
+    rc.NormalizeRect();
+    return rc;
 }
 
 int CEntity::HitTestGrip(CPoint pt, double scale, CPoint offset)
@@ -370,8 +372,8 @@ void CArcEntity::Draw(CDC* pDC, double scale, CPoint offset)
     CBrush* pOldBrush = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
 
 
-    CPoint ptStartArc((int)(c.x + r * cos(angStart)), (int)(c.y + r * sin(angStart)));
-    CPoint ptEndArc((int)(c.x + r * cos(angEnd)), (int)(c.y + r * sin(angEnd)));
+    CPoint ptStartArc = ToScreen(m_ptStart, scale, offset);
+    CPoint ptEndArc = ToScreen(m_ptEnd, scale, offset);
     pDC->Arc(rcEllipse, ptStartArc, ptEndArc);
 
     if (m_bSelected) {
@@ -825,23 +827,42 @@ IMPLEMENT_SERIAL(CPolylineEntity, CEntity, 1)
 
 CPolylineEntity::CPolylineEntity() : m_bClosed(false) { m_Type = ENT_POLYLINE; }
 CPolylineEntity::CPolylineEntity(const std::vector<CPoint>& points)
-    : m_vertices(points), m_bClosed(false) { m_Type = ENT_POLYLINE; }
+    : m_vertices(points), m_bClosed(false) {
+    m_Type = ENT_POLYLINE;
+    m_vertexWidths.assign(points.size(), max(1, m_nLineWidth));
+}
 
 void CPolylineEntity::Draw(CDC* pDC, double scale, CPoint offset)
 {
     if (!m_bVisible || m_vertices.size() < 2) return;
 
-    CPen pen(m_nLineStyle, m_nLineWidth, m_color);
-    CPen* pOldPen = pDC->SelectObject(&pen);
+    CPen* pOldPen = nullptr;
+    auto drawWidthSegment = [&](CPoint a, CPoint b, int w1, int w2) {
+        int chunks = (w1 == w2) ? 1 : max(4, min(24, abs(w2 - w1) * 2));
+        for (int k = 0; k < chunks; ++k) {
+            double t0 = (double)k / chunks;
+            double t1 = (double)(k + 1) / chunks;
+            CPoint p0((int)(a.x + (b.x - a.x) * t0 + 0.5),
+                      (int)(a.y + (b.y - a.y) * t0 + 0.5));
+            CPoint p1((int)(a.x + (b.x - a.x) * t1 + 0.5),
+                      (int)(a.y + (b.y - a.y) * t1 + 0.5));
+            int width = max(1, (int)(w1 + (w2 - w1) * ((t0 + t1) * 0.5) + 0.5));
+            CPen pen(m_nLineStyle, width, m_color);
+            CPen* prev = pDC->SelectObject(&pen);
+            if (!pOldPen) pOldPen = prev;
+            pDC->MoveTo(ToScreen(p0, scale, offset));
+            pDC->LineTo(ToScreen(p1, scale, offset));
+            pDC->SelectObject(prev);
+        }
+    };
 
     int n = (int)m_vertices.size();
-    pDC->MoveTo(ToScreen(m_vertices[0], scale, offset));
-    for (int i = 1; i < n; ++i)
-        pDC->LineTo(ToScreen(m_vertices[i], scale, offset));
-
-
+    if ((int)m_vertexWidths.size() != n)
+        const_cast<CPolylineEntity*>(this)->m_vertexWidths.assign(n, max(1, m_nLineWidth));
+    for (int i = 0; i < n - 1; ++i)
+        drawWidthSegment(m_vertices[i], m_vertices[i + 1], GetVertexWidth(i), GetVertexWidth(i + 1));
     if (m_bClosed && n > 2)
-        pDC->LineTo(ToScreen(m_vertices[0], scale, offset));
+        drawWidthSegment(m_vertices.back(), m_vertices[0], GetVertexWidth(n - 1), GetVertexWidth(0));
     if (m_bSelected) {
         // draw thicker overlay for polyline
         CPen selPen(PS_SOLID, max(2, m_nLineWidth + 2), RGB(0, 255, 255));
@@ -859,7 +880,7 @@ void CPolylineEntity::Draw(CDC* pDC, double scale, CPoint offset)
         }
         pDC->SelectObject(pOldBrush);
     }
-    pDC->SelectObject(pOldPen);
+    if (pOldPen) pDC->SelectObject(pOldPen);
 }
 
 bool CPolylineEntity::HitTest(CPoint pt, double scale, CPoint offset)
@@ -898,6 +919,7 @@ CRect CPolylineEntity::GetBounds() {
 CEntity* CPolylineEntity::Clone() const {
     CPolylineEntity* p = new CPolylineEntity(m_vertices);
     p->m_bClosed = m_bClosed;
+    p->m_vertexWidths = m_vertexWidths;
     p->m_color = m_color; p->m_nLineStyle = m_nLineStyle;
     p->m_nLineWidth = m_nLineWidth; p->m_strLayer = m_strLayer;
     return p;
@@ -909,10 +931,19 @@ void CPolylineEntity::Serialize(CArchive& ar) {
         int n = (int)m_vertices.size();
         ar << n << m_bClosed;
         for (const auto& v : m_vertices) ar << v.x << v.y;
+        int nw = (int)m_vertexWidths.size();
+        ar << nw;
+        for (int w : m_vertexWidths) ar << w;
     } else {
         int n; ar >> n >> m_bClosed;
         m_vertices.resize(n);
         for (auto& v : m_vertices) ar >> v.x >> v.y;
+        int nw = 0;
+        ar >> nw;
+        m_vertexWidths.resize(max(0, nw));
+        for (auto& w : m_vertexWidths) ar >> w;
+        if ((int)m_vertexWidths.size() != n)
+            m_vertexWidths.assign(n, max(1, m_nLineWidth));
     }
 }
 
@@ -922,6 +953,20 @@ CPoint CPolylineEntity::GetGrip(int index) {
 
 void CPolylineEntity::SetGrip(int index, CPoint pt) {
     m_vertices[index] = pt;
+}
+
+int CPolylineEntity::GetVertexWidth(int index) const {
+    if (index >= 0 && index < (int)m_vertexWidths.size())
+        return max(1, m_vertexWidths[index]);
+    return max(1, m_nLineWidth);
+}
+
+void CPolylineEntity::SetVertexWidth(int index, int width) {
+    if (index < 0) return;
+    if ((int)m_vertexWidths.size() < (int)m_vertices.size())
+        m_vertexWidths.resize(m_vertices.size(), max(1, m_nLineWidth));
+    if (index < (int)m_vertexWidths.size())
+        m_vertexWidths[index] = max(1, width);
 }
 
 void CPolylineEntity::Rotate(CPoint base, double angle) {
@@ -947,6 +992,106 @@ void CPolylineEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<Sna
     if (m_bClosed && n > 2) {
         points.push_back(MidPoint(m_vertices.back(), m_vertices[0])); types.push_back(SNAP_MIDPOINT);
     }
+}
+
+// ===========================================================
+
+// ===========================================================
+IMPLEMENT_SERIAL(CPointEntity, CEntity, 1)
+
+CPointEntity::CPointEntity() : m_ptPosition(0,0) { m_Type = ENT_POINT; }
+CPointEntity::CPointEntity(CPoint pos) : m_ptPosition(pos) { m_Type = ENT_POINT; }
+
+void CPointEntity::Draw(CDC* pDC, double scale, CPoint offset)
+{
+    if (!m_bVisible) return;
+
+    CPoint p = ToScreen(m_ptPosition, scale, offset);
+    CPen pen(PS_SOLID, max(1, m_nLineWidth), m_color);
+    CPen* pOldPen = pDC->SelectObject(&pen);
+    CBrush* pOldBrush = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+
+    const int sz = 4;
+    pDC->MoveTo(p.x - sz, p.y);
+    pDC->LineTo(p.x + sz + 1, p.y);
+    pDC->MoveTo(p.x, p.y - sz);
+    pDC->LineTo(p.x, p.y + sz + 1);
+    pDC->Rectangle(p.x - 1, p.y - 1, p.x + 2, p.y + 2);
+
+    if (m_bSelected) {
+        CPen selPen(PS_DASH, 1, RGB(0, 255, 255));
+        pDC->SelectObject(&selPen);
+        pDC->Rectangle(p.x - 6, p.y - 6, p.x + 7, p.y + 7);
+    }
+
+    pDC->SelectObject(pOldBrush);
+    pDC->SelectObject(pOldPen);
+}
+
+bool CPointEntity::HitTest(CPoint pt, double scale, CPoint offset)
+{
+    CPoint p = ToScreen(m_ptPosition, scale, offset);
+    return Distance(pt, p) <= 6.0;
+}
+
+void CPointEntity::Move(double dx, double dy)
+{
+    m_ptPosition.x += (int)dx;
+    m_ptPosition.y += (int)dy;
+}
+
+CRect CPointEntity::GetBounds()
+{
+    return CRect(m_ptPosition.x - 3, m_ptPosition.y - 3,
+                 m_ptPosition.x + 3, m_ptPosition.y + 3);
+}
+
+CEntity* CPointEntity::Clone() const
+{
+    CPointEntity* p = new CPointEntity(m_ptPosition);
+    p->m_color = m_color; p->m_nLineStyle = m_nLineStyle;
+    p->m_nLineWidth = m_nLineWidth; p->m_strLayer = m_strLayer;
+    return p;
+}
+
+void CPointEntity::Serialize(CArchive& ar)
+{
+    CEntity::Serialize(ar);
+    if (ar.IsStoring()) {
+        ar << m_ptPosition.x << m_ptPosition.y;
+    } else {
+        ar >> m_ptPosition.x >> m_ptPosition.y;
+    }
+}
+
+CPoint CPointEntity::GetGrip(int)
+{
+    return m_ptPosition;
+}
+
+void CPointEntity::SetGrip(int, CPoint pt)
+{
+    m_ptPosition = pt;
+}
+
+void CPointEntity::Rotate(CPoint base, double angle)
+{
+    m_ptPosition = RotatePoint(m_ptPosition, base, angle);
+}
+
+void CPointEntity::Scale(CPoint base, double factor)
+{
+    m_ptPosition = ScalePoint(m_ptPosition, base, factor);
+}
+
+void CPointEntity::Mirror(CPoint p1, CPoint p2)
+{
+    m_ptPosition = MirrorPoint(m_ptPosition, p1, p2);
+}
+
+void CPointEntity::GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const
+{
+    points.push_back(m_ptPosition); types.push_back(SNAP_NEAREST);
 }
 
 // ===========================================================

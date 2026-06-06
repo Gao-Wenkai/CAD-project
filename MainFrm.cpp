@@ -69,14 +69,14 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         // Insert Draw menu before View (position 2)
         CMenu drawMenu;
         drawMenu.CreatePopupMenu();
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_LINE,      L"&Line");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_POLYLINE,  L"&Polyline");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_CIRCLE,    L"&Circle");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_ARC,       L"&Arc");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_RECTANGLE, L"&Rectangle");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_POLYGON,   L"P&olygon");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_ELLIPSE,   L"&Ellipse");
-        drawMenu.AppendMenu(MF_STRING, ID_DRAW_TEXT,      L"&Text");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_LINE,      L"&Line\tL");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_POLYLINE,  L"&Polyline\tPL");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_CIRCLE,    L"&Circle\tC");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_ARC,       L"&Arc\tA");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_RECTANGLE, L"&Rectangle\tREC");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_POLYGON,   L"P&olygon\tPOL");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_ELLIPSE,   L"&Ellipse\tEL");
+        drawMenu.AppendMenu(MF_STRING, ID_DRAW_TEXT,      L"&Text\tT");
         drawMenu.AppendMenu(MF_SEPARATOR);
         // Dimension submenu under Draw
         CMenu dimLengthMenu;
@@ -96,13 +96,16 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         // Insert Modify menu after Draw (position 3)
         CMenu modifyMenu;
         modifyMenu.CreatePopupMenu();
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_MOVE,   L"&Move");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_COPY,   L"&Copy");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_ROTATE, L"&Rotate");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_SCALE,  L"&Scale");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_DELETE, L"&Erase");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_MIRROR, L"M&irror");
-        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_OFFSET, L"&Offset");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_MOVE,   L"&Move\tM");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_COPY,   L"&Copy\tCO/CP");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_ROTATE, L"&Rotate\tRO");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_SCALE,  L"&Scale\tSC");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_DELETE, L"&Erase\tE/Del");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_MIRROR, L"M&irror\tMI");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_OFFSET, L"&Offset\tO");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_CHAMFER, L"&Chamfer\tCHA");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_FILLET, L"&Fillet\tF");
+        modifyMenu.AppendMenu(MF_STRING, ID_MODIFY_ARRAY,  L"&Array\tAR");
         pMenu->InsertMenu(3, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)modifyMenu.Detach(), L"&Modify");
 
@@ -113,6 +116,15 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         pMenu->InsertMenu(4, MF_BYPOSITION | MF_POPUP,
                           (UINT_PTR)formatMenu.Detach(), L"F&ormat");
 
+        // Insert Script menu after Format (position 5)
+        CMenu scriptMenu;
+        scriptMenu.CreatePopupMenu();
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RUN,          L"&Run Script...");
+        scriptMenu.AppendMenu(MF_SEPARATOR);
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RECORD_START, L"Start &Recording...");
+        scriptMenu.AppendMenu(MF_STRING, ID_SCRIPT_RECORD_STOP,  L"Stop Re&cording");
+        pMenu->InsertMenu(5, MF_BYPOSITION | MF_POPUP,
+                          (UINT_PTR)scriptMenu.Detach(), L"&Script");
     }
 
     // 2. Command line (bottom of window) - AutoCAD-style
@@ -217,6 +229,9 @@ BOOL CMainFrame::PreTranslateMessage(MSG* pMsg)
                 return TRUE;
             }
         }
+
+        if (RedirectPrintableKeyToCommandLine(pMsg))
+            return TRUE;
     }
 
     // Fix cursor when user clicks in command line - ensure it's after prompt
@@ -237,6 +252,59 @@ BOOL CMainFrame::PreTranslateMessage(MSG* pMsg)
     }
 
     return CFrameWnd::PreTranslateMessage(pMsg);
+}
+
+bool CMainFrame::RedirectPrintableKeyToCommandLine(MSG* pMsg)
+{
+    if (!m_wndCmdLine.GetSafeHwnd())
+        return false;
+
+    CWnd* pFocus = GetFocus();
+    if (pFocus && pFocus->GetSafeHwnd() == m_wndCmdLine.GetSafeHwnd())
+        return false;
+
+    if (::GetKeyState(VK_CONTROL) & 0x8000)
+        return false;
+    if (::GetKeyState(VK_MENU) & 0x8000)
+        return false;
+
+    UINT vk = (UINT)pMsg->wParam;
+    if (vk == VK_RETURN || vk == VK_ESCAPE || vk == VK_DELETE ||
+        vk == VK_BACK || vk == VK_TAB ||
+        (vk >= VK_F1 && vk <= VK_F24) ||
+        vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN ||
+        vk == VK_HOME || vk == VK_END || vk == VK_PRIOR || vk == VK_NEXT ||
+        vk == VK_INSERT) {
+        return false;
+    }
+
+    BYTE keyboardState[256];
+    if (!::GetKeyboardState(keyboardState))
+        return false;
+
+    WCHAR text[8] = {};
+    UINT scanCode = ((UINT)pMsg->lParam >> 16) & 0xff;
+    int nChars = ::ToUnicode(vk, scanCode, keyboardState, text, 7, 0);
+    if (nChars <= 0)
+        return false;
+
+    CString typed(text, nChars);
+    for (int i = 0; i < typed.GetLength(); ++i) {
+        if (typed[i] < 0x20)
+            return false;
+    }
+
+    CLargeHWView* pView = (CLargeHWView*)GetActiveView();
+    CLargeHWDoc* pDoc = pView ? pView->GetDocument() : nullptr;
+    CString prompt = pDoc ? pDoc->m_strCommandPrompt : L"Command: ";
+    if (prompt.IsEmpty())
+        prompt = L"Command: ";
+
+    m_wndCmdLine.SetFocus();
+    m_wndCmdLine.SetWindowText(prompt + typed);
+    int nLen = prompt.GetLength() + typed.GetLength();
+    m_wndCmdLine.SetSel(nLen, nLen);
+    return true;
 }
 
 void CMainFrame::ProcessCommandLine()
@@ -275,30 +343,7 @@ void CMainFrame::ProcessCommandLine()
     }
     strCmd.Trim();
 
-    if (strCmd.IsEmpty()) {
-        pView->SendMessage(WM_KEYDOWN, VK_RETURN, 0);
-    }
-    // Coordinate input: comma, @, <, or single number while in a point-entry state
-    else if (strCmd.Find(L',') >= 0 || strCmd[0] == L'@' || strCmd.Find(L'<') >= 0 ||
-             (pDoc && pDoc->m_drawState != STATE_IDLE && _wtoi(strCmd) != 0 && strCmd != L"0")) {
-        pView->ProcessCoordinateInput(strCmd);
-    }
-    // Command input
-    else {
-        pView->ExecuteCommand(strCmd);
-    }
-
-    // Reset to default prompt if still in idle state
-    if (pDoc && pDoc->m_drawState == STATE_IDLE) {
-        pDoc->m_strCommandPrompt = L"Command: ";
-    }
-
-    // Reset command line text + cursor at end
-    CString strPrompt;
-    if (pDoc) strPrompt = pDoc->m_strCommandPrompt;
-    if (strPrompt.IsEmpty()) strPrompt = L"Command: ";
-    m_wndCmdLine.SetWindowText(strPrompt);
-    m_wndCmdLine.SetSel(strPrompt.GetLength(), strPrompt.GetLength());
+    pView->SubmitCommandLineInput(strCmd);
 }
 
 #ifdef _DEBUG

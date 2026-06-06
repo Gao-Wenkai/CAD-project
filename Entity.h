@@ -27,7 +27,8 @@ enum EntityType {
     ENT_TEXT,
     ENT_DIM_RADIUS,
     ENT_DIM_DIAMETER,
-    ENT_DIM_ARCLENGTH
+    ENT_DIM_ARCLENGTH,
+    ENT_POINT
 };
 
 // Drawing interaction state -- simulates AutoCAD command-line prompt flow
@@ -48,6 +49,8 @@ enum CadDrawState {
     STATE_DRAW_ELLIPSE_CENTER,
     STATE_DRAW_ELLIPSE_RADIUS,
     STATE_DRAW_POLYLINE_POINT,
+    STATE_DRAW_POLYLINE_START_WIDTH,
+    STATE_DRAW_POLYLINE_END_WIDTH,
     STATE_DRAW_TEXT_POS,
     STATE_MOVE_SELECT,
     STATE_MOVE_BASE,
@@ -67,6 +70,15 @@ enum CadDrawState {
     STATE_MIRROR_P2,
     STATE_OFFSET_SELECT,
     STATE_OFFSET_DIST,
+    STATE_CHAMFER_SELECT_FIRST,
+    STATE_CHAMFER_SELECT_SECOND,
+    STATE_FILLET_SELECT_FIRST,
+    STATE_FILLET_SELECT_SECOND,
+    STATE_ARRAY_SELECT,
+    STATE_ARRAY_ROWS,
+    STATE_ARRAY_COLUMNS,
+    STATE_ARRAY_ROW_SPACING,
+    STATE_ARRAY_COLUMN_SPACING,
     STATE_ZOOM_WINDOW_P1,
     STATE_ZOOM_WINDOW_P2,
     STATE_DRAW_DIM_LENGTH_P1,
@@ -339,6 +351,7 @@ public:
     CPolylineEntity(const std::vector<CPoint>& points);
 
     std::vector<CPoint> m_vertices;
+    std::vector<int>    m_vertexWidths;
     bool m_bClosed;
 
     virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
@@ -356,9 +369,40 @@ public:
     virtual void   SetGrip(int index, CPoint pt) override;
     virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 
-    void AddVertex(CPoint pt) { m_vertices.push_back(pt); }
+    void AddVertex(CPoint pt) { m_vertices.push_back(pt); m_vertexWidths.push_back(max(1, m_nLineWidth)); }
+    void AddVertex(CPoint pt, int width) { m_vertices.push_back(pt); m_vertexWidths.push_back(max(1, width)); }
     CPoint GetLastVertex() const { return m_vertices.empty() ? CPoint(0,0) : m_vertices.back(); }
     int    GetVertexCount() const { return (int)m_vertices.size(); }
+    int    GetVertexWidth(int index) const;
+    void   SetVertexWidth(int index, int width);
+};
+
+// -----------------------------------------------------------
+// CPointEntity -- Point marker
+// -----------------------------------------------------------
+class CPointEntity : public CEntity
+{
+    DECLARE_SERIAL(CPointEntity)
+public:
+    CPointEntity();
+    CPointEntity(CPoint pos);
+
+    CPoint m_ptPosition;
+
+    virtual void   Draw(CDC* pDC, double scale, CPoint offset) override;
+    virtual bool   HitTest(CPoint pt, double scale, CPoint offset) override;
+    virtual void   Move(double dx, double dy) override;
+    virtual void   Rotate(CPoint base, double angle) override;
+    virtual void   Scale(CPoint base, double factor) override;
+    virtual void   Mirror(CPoint p1, CPoint p2) override;
+    virtual CRect  GetBounds() override;
+    virtual CEntity* Clone() const override;
+    virtual void   Serialize(CArchive& ar) override;
+
+    virtual int    GetGripCount() override { return 1; }
+    virtual CPoint GetGrip(int index) override;
+    virtual void   SetGrip(int index, CPoint pt) override;
+    virtual void   GetSnapPoints(std::vector<CPoint>& points, std::vector<SnapType>& types) const override;
 };
 
 // -----------------------------------------------------------

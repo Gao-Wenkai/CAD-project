@@ -30,9 +30,11 @@ public:
     // Entity management
     void      AddEntity(CEntity* pEntity, bool bRecordUndo = true);
     void      RemoveEntity(int nEntityID, bool bRecordUndo = true);
+    void      ReplaceEntity(int nEntityID, CEntity* pReplacement, bool bRecordUndo = true);
     void      RemoveAllEntities();
     CEntity*  FindEntityByID(int nID) const;
     CEntity*  HitTestEntity(CPoint pt, double scale, CPoint offset) const;
+    std::vector<CEntity*> HitTestEntities(CPoint pt, double scale, CPoint offset) const;
     int       SelectByPoint(CPoint pt, double scale, CPoint offset);
     int       SelectByWindow(CRect rcWindow, double scale, CPoint offset);
     void      DeselectAll();
@@ -89,6 +91,7 @@ public:
 
     // View transform params (written by View)
     double    m_dScale;
+    double    m_dModelUnitScale;
     CPoint    m_ptOffset;
     bool      m_bShowGrid;
     bool      m_bSnapToGrid;

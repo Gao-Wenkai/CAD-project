@@ -32,6 +32,7 @@ protected:
     afx_msg HBRUSH OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor);
     virtual BOOL PreTranslateMessage(MSG* pMsg) override;
     void ProcessCommandLine();
+    bool RedirectPrintableKeyToCommandLine(MSG* pMsg);
 
     DECLARE_MESSAGE_MAP()
 };

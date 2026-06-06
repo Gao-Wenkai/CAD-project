@@ -16,6 +16,12 @@
 #include <algorithm>
 #include <vector>
 
+#include <afxdlgs.h>
+#include <cfloat>
+#include <climits>
+#include <cstdlib>
+#include <cwctype>
+
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
@@ -124,6 +130,480 @@ static void RestoreTemporarySplits(CLargeHWDoc* pDoc, const std::vector<int>& ne
     for (int id : newIDs) pDoc->RemoveEntity(id, false);
 }
 
+namespace
+{
+CStringA WideToUtf8(const CString& text)
+{
+    int nChars = text.GetLength();
+    if (nChars == 0) return CStringA();
+
+    int nBytes = ::WideCharToMultiByte(CP_UTF8, 0, text, nChars, nullptr, 0, nullptr, nullptr);
+    if (nBytes <= 0) return CStringA();
+
+    CStringA utf8;
+    LPSTR pBuffer = utf8.GetBuffer(nBytes);
+    ::WideCharToMultiByte(CP_UTF8, 0, text, nChars, pBuffer, nBytes, nullptr, nullptr);
+    utf8.ReleaseBuffer(nBytes);
+    return utf8;
+}
+
+bool DecodeTextBytes(const std::vector<BYTE>& bytes, CString& text)
+{
+    text.Empty();
+    if (bytes.empty()) return true;
+
+    if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        int nChars = (int)((bytes.size() - 2) / sizeof(wchar_t));
+        text = CString((LPCWSTR)(bytes.data() + 2), nChars);
+        return true;
+    }
+
+    int nOffset = 0;
+    UINT nCodePage = CP_UTF8;
+    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        nOffset = 3;
+    }
+
+    int nSize = (int)bytes.size() - nOffset;
+    if (nSize <= 0) return true;
+
+    int nChars = ::MultiByteToWideChar(nCodePage, MB_ERR_INVALID_CHARS,
+                                       (LPCCH)bytes.data() + nOffset, nSize,
+                                       nullptr, 0);
+    if (nChars <= 0) {
+        nCodePage = CP_ACP;
+        nChars = ::MultiByteToWideChar(nCodePage, 0,
+                                       (LPCCH)bytes.data(), (int)bytes.size(),
+                                       nullptr, 0);
+        nOffset = 0;
+        nSize = (int)bytes.size();
+    }
+
+    if (nChars <= 0) return false;
+
+    LPWSTR pBuffer = text.GetBuffer(nChars);
+    ::MultiByteToWideChar(nCodePage, 0, (LPCCH)bytes.data() + nOffset, nSize, pBuffer, nChars);
+    text.ReleaseBuffer(nChars);
+    return true;
+}
+
+bool LoadTextFile(const CString& path, CString& text)
+{
+    CFile file;
+    if (!file.Open(path, CFile::modeRead | CFile::shareDenyWrite))
+        return false;
+
+    ULONGLONG nLen64 = file.GetLength();
+    if (nLen64 > INT_MAX) {
+        file.Close();
+        return false;
+    }
+
+    std::vector<BYTE> bytes((size_t)nLen64);
+    if (!bytes.empty())
+        file.Read(bytes.data(), (UINT)bytes.size());
+    file.Close();
+
+    return DecodeTextBytes(bytes, text);
+}
+
+int ScriptRound(double value)
+{
+    return (int)(value >= 0.0 ? floor(value + 0.5) : ceil(value - 0.5));
+}
+
+CString NormalizeScriptWord(const CString& input)
+{
+    CString word = input;
+    word.Trim();
+    while (!word.IsEmpty() && (word[0] == L'_' || word[0] == L'.' || word[0] == L'-'))
+        word = word.Mid(1);
+    word.MakeUpper();
+    return word;
+}
+
+bool TryParseDoubleStrict(const CString& input, double& value)
+{
+    CString s = input;
+    s.Trim();
+    if (s.IsEmpty())
+        return false;
+
+    wchar_t* pEnd = nullptr;
+    value = wcstod(s, &pEnd);
+    while (pEnd && *pEnd != L'\0' && iswspace(*pEnd))
+        ++pEnd;
+    return pEnd && *pEnd == L'\0';
+}
+
+bool TryParseScriptPoint(const CString& input, CPoint ref, CPoint& point, double coordinateScale = 1.0)
+{
+    CString s = input;
+    s.Trim();
+    if (s.IsEmpty())
+        return false;
+
+    bool bRelative = false;
+    if (s[0] == L'@') {
+        bRelative = true;
+        s = s.Mid(1);
+        s.Trim();
+    }
+
+    int nLt = s.Find(L'<');
+    if (nLt > 0) {
+        double dist = 0.0;
+        double angleDeg = 0.0;
+        if (!TryParseDoubleStrict(s.Left(nLt), dist) ||
+            !TryParseDoubleStrict(s.Mid(nLt + 1), angleDeg)) {
+            return false;
+        }
+
+        double angleRad = angleDeg * M_PI / 180.0;
+        point = CPoint(ref.x + ScriptRound(dist * coordinateScale * cos(angleRad)),
+                       ref.y + ScriptRound(dist * coordinateScale * sin(angleRad)));
+        return true;
+    }
+
+    std::vector<CString> parts;
+    int nStart = 0;
+    while (nStart <= s.GetLength()) {
+        int nComma = s.Find(L',', nStart);
+        if (nComma < 0) {
+            parts.push_back(s.Mid(nStart));
+            break;
+        }
+        parts.push_back(s.Mid(nStart, nComma - nStart));
+        nStart = nComma + 1;
+    }
+
+    if (parts.size() < 2)
+        return false;
+
+    double x = 0.0;
+    double y = 0.0;
+    if (!TryParseDoubleStrict(parts[0], x) ||
+        !TryParseDoubleStrict(parts[1], y)) {
+        return false;
+    }
+
+    int ix = ScriptRound(x * coordinateScale);
+    int iy = ScriptRound(y * coordinateScale);
+    point = bRelative ? CPoint(ref.x + ix, ref.y + iy) : CPoint(ix, iy);
+    return true;
+}
+
+double DetermineScriptCoordinateScale(const CString& text)
+{
+    bool hasFractionalCoordinate = false;
+    double maxAbs = 0.0;
+
+    const wchar_t* p = text.GetString();
+    while (*p) {
+        while (*p && !iswdigit(*p) && *p != L'+' && *p != L'-' && *p != L'.')
+            ++p;
+        if (!*p)
+            break;
+
+        const wchar_t* start = p;
+        wchar_t* end = nullptr;
+        double value = wcstod(start, &end);
+        if (end == start) {
+            ++p;
+            continue;
+        }
+
+        bool hasDecimal = false;
+        for (const wchar_t* q = start; q < end; ++q) {
+            if (*q == L'.') {
+                hasDecimal = true;
+                break;
+            }
+        }
+        if (hasDecimal)
+            hasFractionalCoordinate = true;
+
+        maxAbs = max(maxAbs, fabs(value));
+        p = end;
+    }
+
+    if (!hasFractionalCoordinate)
+        return 1.0;
+
+    double scale = 1000.0;
+    while (scale > 1.0 && maxAbs * scale > (double)INT_MAX / 4.0)
+        scale /= 10.0;
+    return max(1.0, scale);
+}
+
+bool TryParseOnOff(const CString& input, bool& value)
+{
+    CString arg = NormalizeScriptWord(input);
+    if (arg == L"ON" || arg == L"1" || arg == L"YES" || arg == L"TRUE") {
+        value = true;
+        return true;
+    }
+    if (arg == L"OFF" || arg == L"0" || arg == L"NO" || arg == L"FALSE") {
+        value = false;
+        return true;
+    }
+    return false;
+}
+
+bool IsAllSelectionToken(const CString& input)
+{
+    CString arg = NormalizeScriptWord(input);
+    return arg == L"ALL" || arg == L"*";
+}
+
+void SelectAllEntities(CLargeHWDoc* pDoc)
+{
+    if (!pDoc) return;
+    for (auto* p : pDoc->GetEntities())
+        p->m_bSelected = true;
+}
+
+CString FormatOnOff(bool value)
+{
+    return value ? L"ON" : L"OFF";
+}
+
+CString QuoteScriptToken(const CString& value)
+{
+    if (value.FindOneOf(L" \t;#\"") < 0)
+        return value;
+
+    CString escaped = value;
+    escaped.Replace(L"\"", L"\\\"");
+    return L"\"" + escaped + L"\"";
+}
+
+double GetModelUnitScale(const CLargeHWDoc* pDoc)
+{
+    if (!pDoc || pDoc->m_dModelUnitScale < 1.0)
+        return 1.0;
+    return pDoc->m_dModelUnitScale;
+}
+
+CString FormatModelNumber(double value)
+{
+    CString text;
+    text.Format(L"%.5f", value);
+    while (text.Find(L'.') >= 0 && text.Right(1) == L"0")
+        text = text.Left(text.GetLength() - 1);
+    if (text.Right(1) == L".")
+        text = text.Left(text.GetLength() - 1);
+    if (text == L"-0")
+        text = L"0";
+    return text;
+}
+
+CString FormatModelPoint(CPoint pt, double modelUnitScale)
+{
+    CString text;
+    text.Format(L"%s,%s",
+                (LPCTSTR)FormatModelNumber(pt.x / modelUnitScale),
+                (LPCTSTR)FormatModelNumber(pt.y / modelUnitScale));
+    return text;
+}
+
+void ApplyDocumentModelUnitScale(CLargeHWDoc* pDoc, double requestedScale)
+{
+    if (!pDoc || requestedScale <= pDoc->m_dModelUnitScale)
+        return;
+
+    double previousScale = GetModelUnitScale(pDoc);
+    double factor = requestedScale / previousScale;
+    if (factor <= 1.0)
+        return;
+
+    for (auto* pEntity : pDoc->GetEntities()) {
+        if (pEntity)
+            pEntity->Scale(CPoint(0, 0), factor);
+    }
+
+    pDoc->m_dScale /= factor;
+    pDoc->m_nGridSpacing = max(1, ScriptRound(pDoc->m_nGridSpacing * factor));
+    pDoc->m_dModelUnitScale = requestedScale;
+}
+
+double ClampViewScale(const CLargeHWDoc* pDoc, double scale)
+{
+    double modelUnitScale = GetModelUnitScale(pDoc);
+    double minScale = 0.001 / modelUnitScale;
+    double maxScale = 10000.0 / modelUnitScale;
+
+    if (scale < minScale)
+        return minScale;
+    if (scale > maxScale)
+        return maxScale;
+    return scale;
+}
+
+void FitViewToWorldBounds(CLargeHWDoc* pDoc, CRect bounds, const CRect& rcClient, int marginPx)
+{
+    if (!pDoc || rcClient.Width() <= 0 || rcClient.Height() <= 0)
+        return;
+
+    bounds.NormalizeRect();
+    int minHalfExtent = max(1, ScriptRound(GetModelUnitScale(pDoc)));
+    if (bounds.Width() <= 0)
+        bounds.InflateRect(minHalfExtent, 0);
+    if (bounds.Height() <= 0)
+        bounds.InflateRect(0, minHalfExtent);
+
+    int usableWidth = max(1, rcClient.Width() - marginPx * 2);
+    int usableHeight = max(1, rcClient.Height() - marginPx * 2);
+    double sx = (double)usableWidth / max(1, bounds.Width());
+    double sy = (double)usableHeight / max(1, bounds.Height());
+
+    pDoc->m_dScale = ClampViewScale(pDoc, min(sx, sy));
+
+    double contentWidth = bounds.Width() * pDoc->m_dScale;
+    double contentHeight = bounds.Height() * pDoc->m_dScale;
+    double xMargin = (rcClient.Width() - contentWidth) / 2.0;
+    double yMargin = (rcClient.Height() - contentHeight) / 2.0;
+
+    pDoc->m_ptOffset = CPoint(
+        ScriptRound(xMargin - bounds.left * pDoc->m_dScale),
+        ScriptRound(yMargin + bounds.bottom * pDoc->m_dScale)
+    );
+}
+
+bool IntersectInfiniteLines(CPoint a1, CPoint a2, CPoint b1, CPoint b2, double& ix, double& iy)
+{
+    double x1 = a1.x, y1 = a1.y;
+    double x2 = a2.x, y2 = a2.y;
+    double x3 = b1.x, y3 = b1.y;
+    double x4 = b2.x, y4 = b2.y;
+    double den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+    if (fabs(den) < 1e-9)
+        return false;
+
+    double det1 = x1 * y2 - y1 * x2;
+    double det2 = x3 * y4 - y3 * x4;
+    ix = (det1 * (x3 - x4) - (x1 - x2) * det2) / den;
+    iy = (det1 * (y3 - y4) - (y1 - y2) * det2) / den;
+    return true;
+}
+
+CPoint PointFromIntersectionTowardEndpoint(double ix, double iy, CPoint endpoint, double distance)
+{
+    double vx = endpoint.x - ix;
+    double vy = endpoint.y - iy;
+    double len = sqrt(vx * vx + vy * vy);
+    if (len < 1e-9)
+        return CPoint(ScriptRound(ix), ScriptRound(iy));
+
+    double d = min(max(0.0, distance), len);
+    return CPoint(ScriptRound(ix + vx / len * d), ScriptRound(iy + vy / len * d));
+}
+
+CPoint ClosestLineEndpointToPoint(const CLineEntity* pLine, double x, double y)
+{
+    double sx = (double)pLine->m_ptStart.x - x;
+    double sy = (double)pLine->m_ptStart.y - y;
+    double ex = (double)pLine->m_ptEnd.x - x;
+    double ey = (double)pLine->m_ptEnd.y - y;
+    double dStart = sqrt(sx * sx + sy * sy);
+    double dEnd = sqrt(ex * ex + ey * ey);
+    return dStart <= dEnd ? pLine->m_ptStart : pLine->m_ptEnd;
+}
+
+CPoint ChamferPointOnSegment(CPoint start, CPoint end, double ix, double iy,
+                             double distance, CPoint& endpointToTrim)
+{
+    CLineEntity temp(start, end);
+    endpointToTrim = ClosestLineEndpointToPoint(&temp, ix, iy);
+    CPoint directionEndpoint = (endpointToTrim == start) ? end : start;
+    return PointFromIntersectionTowardEndpoint(ix, iy, directionEndpoint, distance);
+}
+
+bool ComputeFilletGeometry(CPoint s1, CPoint e1, CPoint s2, CPoint e2, double radius,
+                           CPoint& trim1, CPoint& trim2, CPoint& tan1, CPoint& tan2,
+                           CPoint& center, int& actualRadius)
+{
+    double ix = 0.0, iy = 0.0;
+    if (!IntersectInfiniteLines(s1, e1, s2, e2, ix, iy))
+        return false;
+
+    CLineEntity line1(s1, e1);
+    CLineEntity line2(s2, e2);
+    trim1 = ClosestLineEndpointToPoint(&line1, ix, iy);
+    trim2 = ClosestLineEndpointToPoint(&line2, ix, iy);
+    CPoint dirEnd1 = (trim1 == s1) ? e1 : s1;
+    CPoint dirEnd2 = (trim2 == s2) ? e2 : s2;
+
+    double u1x = dirEnd1.x - ix, u1y = dirEnd1.y - iy;
+    double u2x = dirEnd2.x - ix, u2y = dirEnd2.y - iy;
+    double len1 = sqrt(u1x * u1x + u1y * u1y);
+    double len2 = sqrt(u2x * u2x + u2y * u2y);
+    if (len1 < 1e-6 || len2 < 1e-6 || radius <= 0.0)
+        return false;
+
+    u1x /= len1; u1y /= len1;
+    u2x /= len2; u2y /= len2;
+    double dot = max(-1.0, min(1.0, u1x * u2x + u1y * u2y));
+    double theta = acos(dot);
+    if (theta < 1e-3 || fabs(theta - M_PI) < 1e-3)
+        return false;
+
+    double tangent = radius / tan(theta / 2.0);
+    tangent = min(tangent, min(len1, len2));
+    double r = tangent * tan(theta / 2.0);
+    if (r < 1.0)
+        return false;
+
+    tan1 = CPoint(ScriptRound(ix + u1x * tangent), ScriptRound(iy + u1y * tangent));
+    tan2 = CPoint(ScriptRound(ix + u2x * tangent), ScriptRound(iy + u2y * tangent));
+
+    double bx = u1x + u2x, by = u1y + u2y;
+    double bl = sqrt(bx * bx + by * by);
+    if (bl < 1e-6)
+        return false;
+    bx /= bl; by /= bl;
+    double centerDist = r / sin(theta / 2.0);
+    center = CPoint(ScriptRound(ix + bx * centerDist), ScriptRound(iy + by * centerDist));
+    actualRadius = max(1, ScriptRound(r));
+    return true;
+}
+
+void AppendArcApprox(std::vector<CPoint>& out, CPoint center, int radius, CPoint from, CPoint to)
+{
+    double a1 = atan2((double)(from.y - center.y), (double)(from.x - center.x));
+    double a2 = atan2((double)(to.y - center.y), (double)(to.x - center.x));
+    double sweep = a2 - a1;
+    while (sweep > M_PI) sweep -= 2.0 * M_PI;
+    while (sweep < -M_PI) sweep += 2.0 * M_PI;
+
+    int segments = max(12, min(48, radius / 4));
+    for (int i = 0; i <= segments; ++i) {
+        double t = (double)i / segments;
+        double a = a1 + sweep * t;
+        CPoint p(ScriptRound(center.x + radius * cos(a)),
+                 ScriptRound(center.y + radius * sin(a)));
+        if (out.empty() || out.back() != p)
+            out.push_back(p);
+    }
+}
+
+void AppendPolylineArcApprox(std::vector<CPoint>& vertices, CPoint start, CPoint end)
+{
+    double dx = end.x - start.x;
+    double dy = end.y - start.y;
+    double chord = sqrt(dx * dx + dy * dy);
+    if (chord < 1.0)
+        return;
+
+    CPoint center((start.x + end.x) / 2, (start.y + end.y) / 2);
+    int radius = max(1, ScriptRound(chord / 2.0));
+    std::vector<CPoint> arcPts;
+    AppendArcApprox(arcPts, center, radius, start, end);
+    for (size_t i = 1; i < arcPts.size(); ++i)
+        vertices.push_back(arcPts[i]);
+}
+
+
 IMPLEMENT_DYNCREATE(CLargeHWView, CView)
 
 // Text input dialog
@@ -207,6 +687,9 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_MODIFY_DELETE,   &CLargeHWView::OnModifyDelete)
     ON_COMMAND(ID_MODIFY_MIRROR,   &CLargeHWView::OnModifyMirror)
     ON_COMMAND(ID_MODIFY_OFFSET,   &CLargeHWView::OnModifyOffset)
+    ON_COMMAND(ID_MODIFY_CHAMFER,  &CLargeHWView::OnModifyChamfer)
+    ON_COMMAND(ID_MODIFY_FILLET,   &CLargeHWView::OnModifyFillet)
+    ON_COMMAND(ID_MODIFY_ARRAY,    &CLargeHWView::OnModifyArray)
 
     ON_COMMAND(ID_EDIT_UNDO,       &CLargeHWView::OnEditUndo)
     ON_COMMAND(ID_EDIT_REDO,       &CLargeHWView::OnEditRedo)
@@ -243,6 +726,12 @@ BEGIN_MESSAGE_MAP(CLargeHWView, CView)
     ON_COMMAND(ID_CONTEXT_CANCEL,  &CLargeHWView::OnCancelCommand)
     ON_COMMAND(ID_CONTEXT_REPEAT,  &CLargeHWView::OnContextRepeat)
     ON_COMMAND(ID_FORMAT_LAYER,    &CLargeHWView::OnFormatLayer)
+    ON_COMMAND(ID_SCRIPT_RUN,      &CLargeHWView::OnScriptRun)
+    ON_COMMAND(ID_SCRIPT_RECORD_START, &CLargeHWView::OnScriptRecordStart)
+    ON_COMMAND(ID_SCRIPT_RECORD_STOP,  &CLargeHWView::OnScriptRecordStop)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RUN, &CLargeHWView::OnUpdateScriptRun)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RECORD_START, &CLargeHWView::OnUpdateScriptRecordStart)
+    ON_UPDATE_COMMAND_UI(ID_SCRIPT_RECORD_STOP,  &CLargeHWView::OnUpdateScriptRecordStop)
 END_MESSAGE_MAP()
 
 // Constructor/Destructor
@@ -255,6 +744,20 @@ CLargeHWView::CLargeHWView() noexcept
     , m_nPolygonSides(6)
     , m_bArcAltHalf(false)
     , m_bPolylineClose(false)
+    , m_bPolylineArcMode(false)
+    , m_nPolylineWidth(1)
+    , m_nPolylineStartWidth(1)
+    , m_nPolylineEndWidth(1)
+    , m_pActivePolyline(nullptr)
+    , m_pChamferFirst(nullptr)
+    , m_chamferFirstSegment()
+    , m_dChamferDistance(20.0)
+    , m_filletFirstSegment()
+    , m_dFilletRadius(20.0)
+    , m_nArrayRows(2)
+    , m_nArrayColumns(2)
+    , m_dArrayRowSpacing(50.0)
+    , m_dArrayColumnSpacing(50.0)
     , m_bPanning(false)
     , m_ptPanStart(0, 0)
     , m_ptPanOffsetStart(0, 0)
@@ -272,10 +775,20 @@ CLargeHWView::CLargeHWView() noexcept
     , m_pDimArcLenSrcEnt(nullptr)
     , m_bCoordDimMode(false)
     , m_ptCoordPoint(0,0)
+    , m_bScriptRecording(false)
+    , m_bRunningScript(false)
+    , m_bSubmittingCommandLine(false)
+    , m_dScriptCoordinateScale(1.0)
 {
 }
 
-CLargeHWView::~CLargeHWView() {}
+CLargeHWView::~CLargeHWView()
+{
+    if (m_bScriptRecording) {
+        m_scriptRecordFile.Close();
+        m_bScriptRecording = false;
+    }
+}
 
 BOOL CLargeHWView::PreCreateWindow(CREATESTRUCT& cs)
 {
@@ -415,12 +928,7 @@ void CLargeHWView::DrawEntities(CDC* pDC)
         p->Draw(pDC, pDoc->m_dScale, pDoc->m_ptOffset);
         if (p->m_bSelected) {
             CRect bounds = p->GetBounds();
-            CRect screenBounds(
-                (int)(bounds.left * pDoc->m_dScale + pDoc->m_ptOffset.x),
-                (int)(bounds.top * pDoc->m_dScale + pDoc->m_ptOffset.y),
-                (int)(bounds.right * pDoc->m_dScale + pDoc->m_ptOffset.x),
-                (int)(bounds.bottom * pDoc->m_dScale + pDoc->m_ptOffset.y)
-            );
+            if (pDoc->m_drawState >= STATE_DRAW_DIM_LENGTH_P1 && pDoc->m_drawState <= STATE_DRAW_DIM_COORD_PICK) {
         // draw selection overlay for different entity types (thick cyan stroke)
         for (size_t j = 0; j < ents.size(); ++j) {
             CEntity* e2 = const_cast<CEntity*>(ents[j]);
@@ -520,6 +1028,17 @@ void CLargeHWView::DrawEntities(CDC* pDC)
                 continue;
             }
         }
+            } else {
+            CRect screenBounds = p->ToScreenRect(bounds, pDoc->m_dScale, pDoc->m_ptOffset);
+            screenBounds.NormalizeRect();
+            screenBounds.InflateRect(3, 3);
+            CPen hlPen(PS_SOLID, 2, RGB(0, 255, 255));
+            CPen* pOld = pDC->SelectObject(&hlPen);
+            CBrush* pOldBr = (CBrush*)pDC->SelectStockObject(NULL_BRUSH);
+            pDC->Rectangle(&screenBounds);
+            pDC->SelectObject(pOld);
+            pDC->SelectObject(pOldBr);
+            }
         }
     }
 }
@@ -558,7 +1077,8 @@ void CLargeHWView::DrawPreview(CDC* pDC)
     case STATE_DRAW_LINE_P2:
     case STATE_DRAW_RECT_P2:
         if (m_tempPts.size() >= 1) {
-            CPoint p1 = WorldToScreen(m_tempPts[0]);
+            CPoint p1 = WorldToScreen(
+                pDoc->m_drawState == STATE_DRAW_LINE_P2 ? m_tempPts.back() : m_tempPts[0]);
             pDC->MoveTo(p1);
             pDC->LineTo(cursorPt);
         }
@@ -1106,7 +1626,7 @@ void CLargeHWView::DrawPreview(CDC* pDC)
 
     case STATE_DRAW_POLYLINE_POINT:
         // Draw all placed segments + rubber band to cursor
-        if (m_tempPts.size() >= 2) {
+        if (!m_pActivePolyline && m_tempPts.size() >= 2) {
             for (size_t i = 0; i < m_tempPts.size() - 1; ++i) {
                 CPoint p1 = WorldToScreen(m_tempPts[i]);
                 CPoint p2 = WorldToScreen(m_tempPts[i+1]);
@@ -1116,8 +1636,18 @@ void CLargeHWView::DrawPreview(CDC* pDC)
         }
         if (m_tempPts.size() >= 1) {
             CPoint last = WorldToScreen(m_tempPts.back());
-            pDC->MoveTo(last);
-            pDC->LineTo(cursorPt);
+            if (m_bPolylineArcMode) {
+                std::vector<CPoint> previewPts;
+                previewPts.push_back(m_tempPts.back());
+                AppendPolylineArcApprox(previewPts, m_tempPts.back(), curWorld);
+                for (size_t i = 1; i < previewPts.size(); ++i) {
+                    pDC->MoveTo(WorldToScreen(previewPts[i - 1]));
+                    pDC->LineTo(WorldToScreen(previewPts[i]));
+                }
+            } else {
+                pDC->MoveTo(last);
+                pDC->LineTo(cursorPt);
+            }
         }
         // Closed mode: dashed line from last point back to first
         if (m_bPolylineClose && m_tempPts.size() >= 2) {
@@ -1142,9 +1672,9 @@ void CLargeHWView::DrawPreview(CDC* pDC)
                                     (double)(curWorld.x - ptCenter.x));
 
                 CPoint scrStart(c.x + (int)(scrR * cos(angS)),
-                                c.y + (int)(scrR * sin(angS)));
+                                c.y - (int)(scrR * sin(angS)));
                 CPoint scrEnd(c.x + (int)(scrR * cos(angE)),
-                              c.y + (int)(scrR * sin(angE)));
+                              c.y - (int)(scrR * sin(angE)));
 
                 pDC->Arc(c.x - scrR, c.y - scrR, c.x + scrR, c.y + scrR,
                          scrStart.x, scrStart.y, scrEnd.x, scrEnd.y);
@@ -1167,9 +1697,9 @@ void CLargeHWView::DrawPreview(CDC* pDC)
                                     (double)(ptEnd.x - ptCenter.x));
 
                 CPoint scrStart(c.x + (int)(scrR * cos(angS)),
-                                c.y + (int)(scrR * sin(angS)));
+                                c.y - (int)(scrR * sin(angS)));
                 CPoint scrEnd(c.x + (int)(scrR * cos(angE)),
-                              c.y + (int)(scrR * sin(angE)));
+                              c.y - (int)(scrR * sin(angE)));
 
                 if (!m_bArcAltHalf) {
                     pDC->Arc(c.x - scrR, c.y - scrR, c.x + scrR, c.y + scrR,
@@ -1333,7 +1863,7 @@ CPoint CLargeHWView::WorldToScreen(CPoint world) const
     CLargeHWDoc* pDoc = GetDocument();
     double s = pDoc ? pDoc->m_dScale : 1.0;
     CPoint off = pDoc ? pDoc->m_ptOffset : CPoint(0, 0);
-    return CPoint((int)(world.x * s + off.x), (int)(world.y * s + off.y));
+    return CPoint((int)(world.x * s + off.x), (int)(off.y - world.y * s));
 }
 
 CPoint CLargeHWView::ScreenToWorld(CPoint screen) const
@@ -1342,7 +1872,7 @@ CPoint CLargeHWView::ScreenToWorld(CPoint screen) const
     double s = pDoc ? pDoc->m_dScale : 1.0;
     if (s <= 0) s = 1;
     CPoint off = pDoc ? pDoc->m_ptOffset : CPoint(0, 0);
-    return CPoint((int)((screen.x - off.x) / s), (int)((screen.y - off.y) / s));
+    return CPoint((int)((screen.x - off.x) / s), (int)((off.y - screen.y) / s));
 }
 
 CPoint CLargeHWView::SnapToGrid(CPoint pt) const
@@ -1417,8 +1947,11 @@ void CLargeHWView::UpdateStatusBar()
 
     CPoint world = ScreenToWorld(m_ptCurrent);
     CString strCoord;
-    strCoord.Format(L"X: %d  Y: %d  | Zoom: %.2f  |  %s  SNAP=%s GRID=%s ORTHO=%s OSNAP=%s",
-                    world.x, world.y, pDoc->m_dScale,
+    double modelUnitScale = GetModelUnitScale(pDoc);
+    CString xText = FormatModelNumber(world.x / modelUnitScale);
+    CString yText = FormatModelNumber(world.y / modelUnitScale);
+    strCoord.Format(L"X: %s  Y: %s  | Zoom: %.2f  |  %s  SNAP=%s GRID=%s ORTHO=%s OSNAP=%s",
+                    (LPCTSTR)xText, (LPCTSTR)yText, pDoc->m_dScale * modelUnitScale,
                     (LPCTSTR)pDoc->m_strCommandPrompt,
                     pDoc->m_bSnapToGrid ? L"ON" : L"OFF",
                     pDoc->m_bShowGrid ? L"ON" : L"OFF",
@@ -1458,7 +1991,9 @@ void CLargeHWView::SetDrawState(CadDrawState state)
     case STATE_DRAW_POLYGON_RADIUS:  pDoc->m_strCommandPrompt = L"POLYGON Specify radius: "; break;
     case STATE_DRAW_ELLIPSE_CENTER:  pDoc->m_strCommandPrompt = L"ELLIPSE Specify center: "; break;
     case STATE_DRAW_ELLIPSE_RADIUS:  pDoc->m_strCommandPrompt = L"ELLIPSE Specify axis endpoint: "; break;
-    case STATE_DRAW_POLYLINE_POINT:  pDoc->m_strCommandPrompt = L"PLINE Specify next point (ENTER to finish): "; break;
+    case STATE_DRAW_POLYLINE_POINT:  pDoc->m_strCommandPrompt.Format(L"PLINE Specify next point [Arc/Line/Width/Close] mode=%s width=%d: ", m_bPolylineArcMode ? L"ARC" : L"LINE", m_nPolylineWidth); break;
+    case STATE_DRAW_POLYLINE_START_WIDTH: pDoc->m_strCommandPrompt.Format(L"PLINE Specify start width <%d>: ", m_nPolylineWidth); break;
+    case STATE_DRAW_POLYLINE_END_WIDTH:   pDoc->m_strCommandPrompt.Format(L"PLINE Specify end width <%d>: ", m_nPolylineWidth); break;
     case STATE_DRAW_DIM_LENGTH_P1:   pDoc->m_strCommandPrompt = L"DIMENSION Specify first extension point: "; break;
     case STATE_DRAW_DIM_LENGTH_P2:   pDoc->m_strCommandPrompt = L"DIMENSION Specify second extension point: "; break;
     case STATE_DRAW_DIM_LENGTH_POS:  pDoc->m_strCommandPrompt = L"DIMENSION Click to place dimension line and text: "; break;
@@ -1490,6 +2025,15 @@ void CLargeHWView::SetDrawState(CadDrawState state)
     case STATE_MIRROR_P2:            pDoc->m_strCommandPrompt = L"MIRROR Specify second point of mirror line: "; break;
     case STATE_OFFSET_SELECT:        pDoc->m_strCommandPrompt = L"OFFSET Select entity to offset: "; break;
     case STATE_OFFSET_DIST:          pDoc->m_strCommandPrompt = L"OFFSET Specify offset distance (click point on side): "; break;
+    case STATE_CHAMFER_SELECT_FIRST: pDoc->m_strCommandPrompt.Format(L"CHAMFER Select first line or enter distance <%.0f>: ", m_dChamferDistance); break;
+    case STATE_CHAMFER_SELECT_SECOND:pDoc->m_strCommandPrompt = L"CHAMFER Select second line: "; break;
+    case STATE_FILLET_SELECT_FIRST:  pDoc->m_strCommandPrompt.Format(L"FILLET Select first edge or enter radius <%.0f>: ", m_dFilletRadius); break;
+    case STATE_FILLET_SELECT_SECOND: pDoc->m_strCommandPrompt = L"FILLET Select second adjacent edge: "; break;
+    case STATE_ARRAY_SELECT:         pDoc->m_strCommandPrompt = L"ARRAY Select objects (ENTER to finish): "; break;
+    case STATE_ARRAY_ROWS:           pDoc->m_strCommandPrompt.Format(L"ARRAY Enter number of rows <%d>: ", m_nArrayRows); break;
+    case STATE_ARRAY_COLUMNS:        pDoc->m_strCommandPrompt.Format(L"ARRAY Enter number of columns <%d>: ", m_nArrayColumns); break;
+    case STATE_ARRAY_ROW_SPACING:    pDoc->m_strCommandPrompt.Format(L"ARRAY Enter row item spacing <%.0f>: ", m_dArrayRowSpacing); break;
+    case STATE_ARRAY_COLUMN_SPACING: pDoc->m_strCommandPrompt.Format(L"ARRAY Enter column item spacing <%.0f>: ", m_dArrayColumnSpacing); break;
     case STATE_ZOOM_WINDOW_P1:       pDoc->m_strCommandPrompt = L"ZOOM Window: Specify first corner: "; break;
     case STATE_ZOOM_WINDOW_P2:       pDoc->m_strCommandPrompt = L"ZOOM Window: Specify opposite corner: "; break;
     case STATE_IDLE:
@@ -1512,6 +2056,7 @@ void CLargeHWView::CompleteDrawCommand()
 {
     TRACE(L"[DEBUG] CompleteDrawCommand called\n");
     m_tempPts.clear();
+    m_pActivePolyline = nullptr;
     SetDrawState(STATE_IDLE);
 }
 
@@ -1544,10 +2089,18 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
 
     world = worldSnapped;
 
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine &&
+        state != STATE_DRAW_TEXT_POS && ShouldRecordPointForState(state)) {
+        RecordScriptInput(FormatScriptPoint(world));
+    }
+
     // Check grip hit first (only in IDLE state)
     if (state == STATE_IDLE) {
-        CEntity* hitEntity = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
-        if (hitEntity && hitEntity->m_bSelected) {
+        std::vector<CEntity*> hitEntities = pDoc->HitTestEntities(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        for (auto* hitEntity : hitEntities) {
+            if (!hitEntity || !hitEntity->m_bSelected)
+                continue;
+
             int gripIdx = hitEntity->HitTestGrip(point, pDoc->m_dScale, pDoc->m_ptOffset);
             if (gripIdx >= 0) {
                 pDoc->RecordGripUndo(hitEntity);
@@ -1562,13 +2115,23 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
 
     switch (state) {
     case STATE_IDLE: {
-        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
-        if (hit) {
-            if (!(nFlags & MK_CONTROL))
+        std::vector<CEntity*> hits = pDoc->HitTestEntities(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        if (!hits.empty()) {
+            CEntity* hit = hits.front();
+            if (nFlags & MK_CONTROL) {
+                hit->m_bSelected = true;
+            } else {
+                for (size_t i = 0; i < hits.size(); ++i) {
+                    if (hits[i]->m_bSelected) {
+                        hit = hits[(i + 1) % hits.size()];
+                        break;
+                    }
+                }
                 pDoc->DeselectAll();
-            hit->m_bSelected = true;
+                hit->m_bSelected = true;
+            }
         } else {
-            // Ctrl+click on empty space → zoom window drag
+            // Ctrl+click on empty space starts zoom window drag
             if (nFlags & MK_CONTROL) {
                 pDoc->m_drawState = STATE_ZOOM_WINDOW_P1;
                 m_bDrawing = true;
@@ -1593,10 +2156,13 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         break;
 
     case STATE_DRAW_LINE_P2: {
-        m_tempPts.push_back(world);
-        CLineEntity* pLine = new CLineEntity(m_tempPts[0], m_tempPts[1]);
+        CLineEntity* pLine = new CLineEntity(m_tempPts.back(), world);
         pDoc->AddEntity(pLine);
-        CompleteDrawCommand();
+        CPoint firstPt = m_tempPts.front();
+        m_tempPts.clear();
+        m_tempPts.push_back(firstPt);
+        m_tempPts.push_back(world);
+        SetDrawState(STATE_DRAW_LINE_P2);
         break;
     }
 
@@ -1671,7 +2237,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
     }
 
     case STATE_DRAW_POLYLINE_POINT:
-        m_tempPts.push_back(world);
+        AddPolylinePoint(world);
         SetDrawState(STATE_DRAW_POLYLINE_POINT);
         break;
 
@@ -1752,6 +2318,15 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
             if (dlg.DoModal() == IDOK) {
                 CTextEntity* pText = new CTextEntity(world, dlg.m_strText, dlg.m_nHeight);
                 pDoc->AddEntity(pText);
+            }
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+                CString strTextCommand;
+                double modelUnitScale = GetModelUnitScale(pDoc);
+                strTextCommand.Format(L"TEXT %s %s \"%s\"",
+                                      (LPCTSTR)FormatModelPoint(world, modelUnitScale),
+                                      (LPCTSTR)FormatModelNumber(dlg.m_nHeight / modelUnitScale),
+                                      (LPCTSTR)EscapeScriptText(dlg.m_strText));
+                RecordScriptInput(strTextCommand);
             }
             CompleteDrawCommand();
         }
@@ -2547,6 +3122,73 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
         break;
     }
 
+    case STATE_CHAMFER_SELECT_FIRST: {
+        ChamferSegmentRef seg = HitTestChamferSegment(point);
+        if (seg.IsValid()) {
+            pDoc->DeselectAll();
+            m_chamferFirstSegment = seg;
+            m_pChamferFirst = (seg.pEntity->m_Type == ENT_LINE)
+                ? static_cast<CLineEntity*>(seg.pEntity)
+                : nullptr;
+            SetDrawState(STATE_CHAMFER_SELECT_SECOND);
+        } else {
+            pDoc->m_strCommandPrompt = L"CHAMFER Select a line, rectangle edge, or polyline segment: ";
+            UpdateStatusBar();
+        }
+        break;
+    }
+
+    case STATE_CHAMFER_SELECT_SECOND: {
+        ChamferSegmentRef seg = HitTestChamferSegment(point);
+        if (seg.IsValid() &&
+            (seg.pEntity != m_chamferFirstSegment.pEntity ||
+             seg.segmentIndex != m_chamferFirstSegment.segmentIndex)) {
+            ApplyChamfer(m_chamferFirstSegment, seg, m_dChamferDistance);
+        } else {
+            pDoc->m_strCommandPrompt = L"CHAMFER Select a different second segment: ";
+            UpdateStatusBar();
+        }
+        break;
+    }
+
+    case STATE_FILLET_SELECT_FIRST: {
+        ChamferSegmentRef seg = HitTestChamferSegment(point);
+        if (seg.IsValid()) {
+            pDoc->DeselectAll();
+            m_filletFirstSegment = seg;
+            SetDrawState(STATE_FILLET_SELECT_SECOND);
+        } else {
+            pDoc->m_strCommandPrompt = L"FILLET Select a line, rectangle edge, or polyline segment: ";
+            UpdateStatusBar();
+        }
+        break;
+    }
+
+    case STATE_FILLET_SELECT_SECOND: {
+        ChamferSegmentRef seg = HitTestChamferSegment(point);
+        if (seg.IsValid() &&
+            (seg.pEntity != m_filletFirstSegment.pEntity ||
+             seg.segmentIndex != m_filletFirstSegment.segmentIndex)) {
+            ApplyFillet(m_filletFirstSegment, seg, m_dFilletRadius);
+        } else {
+            pDoc->m_strCommandPrompt = L"FILLET Select a different second segment: ";
+            UpdateStatusBar();
+        }
+        break;
+    }
+
+    case STATE_ARRAY_SELECT: {
+        CEntity* hit = pDoc->HitTestEntity(point, pDoc->m_dScale, pDoc->m_ptOffset);
+        if (hit) {
+            hit->m_bSelected = true;
+            pDoc->m_strCommandPrompt.Format(L"ARRAY Select objects (ENTER to finish): %d selected",
+                                            pDoc->GetSelectedCount());
+            SyncCommandLinePrompt();
+            UpdateStatusBar();
+        }
+        break;
+    }
+
     case STATE_ZOOM_WINDOW_P1:
         m_ptDragStart = point;
         SetDrawState(STATE_ZOOM_WINDOW_P2);
@@ -2566,13 +3208,7 @@ void CLargeHWView::OnLButtonDown(UINT nFlags, CPoint point)
             GetClientRect(&rcClient);
 
             if (rcWorld.Width() > 0 && rcWorld.Height() > 0) {
-                double sx = (double)rcClient.Width() / rcWorld.Width();
-                double sy = (double)rcClient.Height() / rcWorld.Height();
-                pDoc->m_dScale = min(sx, sy);
-                pDoc->m_ptOffset = CPoint(
-                    (int)(-rcWorld.left * pDoc->m_dScale),
-                    (int)(-rcWorld.top * pDoc->m_dScale)
-                );
+                FitViewToWorldBounds(pDoc, rcWorld, rcClient, 0);
             }
         }
         CompleteDrawCommand();
@@ -2628,14 +3264,9 @@ void CLargeHWView::OnLButtonUp(UINT nFlags, CPoint point)
             GetClientRect(&rcClient);
 
             if (rcWorld.Width() > 0 && rcWorld.Height() > 0) {
-                double sx = (double)rcClient.Width() / rcWorld.Width();
-                double sy = (double)rcClient.Height() / rcWorld.Height();
-                pDoc->m_dScale = min(sx, sy);
-                pDoc->m_ptOffset = CPoint(
-                    (int)(-rcWorld.left * pDoc->m_dScale),
-                    (int)(-rcWorld.top * pDoc->m_dScale)
-                );
-                pDoc->m_strCommandPrompt.Format(L"Zoom Window: scale=%.2f", pDoc->m_dScale);
+                FitViewToWorldBounds(pDoc, rcWorld, rcClient, 0);
+                pDoc->m_strCommandPrompt.Format(L"Zoom Window: scale=%.2f",
+                                                pDoc->m_dScale * GetModelUnitScale(pDoc));
             }
         } else {
             pDoc->m_strCommandPrompt = L"Zoom Window: area too small, cancelled";
@@ -2737,19 +3368,19 @@ void CLargeHWView::OnRButtonDown(UINT nFlags, CPoint point)
 BOOL CLargeHWView::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt)
 {
     CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc)
+        return CView::OnMouseWheel(nFlags, zDelta, pt);
 
-    CPoint worldBefore = ScreenToWorld(m_ptCurrent);
+    ScreenToClient(&pt);
+    m_ptCurrent = pt;
+    CPoint worldBefore = ScreenToWorld(pt);
 
     double zoomFactor = (zDelta > 0) ? 1.1 : 1.0 / 1.1;
-    double newScale = pDoc->m_dScale * zoomFactor;
-    if (newScale < 0.05) newScale = 0.05;
-    if (newScale > 20.0) newScale = 20.0;
+    double newScale = ClampViewScale(pDoc, pDoc->m_dScale * zoomFactor);
 
     pDoc->m_dScale = newScale;
-
-    CPoint worldAfter = ScreenToWorld(m_ptCurrent);
-    pDoc->m_ptOffset.x += (int)((worldAfter.x - worldBefore.x) * pDoc->m_dScale);
-    pDoc->m_ptOffset.y += (int)((worldAfter.y - worldBefore.y) * pDoc->m_dScale);
+    pDoc->m_ptOffset.x = ScriptRound(pt.x - worldBefore.x * pDoc->m_dScale);
+    pDoc->m_ptOffset.y = ScriptRound(pt.y + worldBefore.y * pDoc->m_dScale);
 
     UpdateStatusBar();
     Invalidate(FALSE);
@@ -2792,28 +3423,35 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
         break;
 
     case 'C':
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 && m_tempPts.size() >= 2) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"C");
+            CloseLineCommand();
+            return;
+        }
         if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
-            m_bPolylineClose = !m_bPolylineClose;
-            pDoc->m_strCommandPrompt.Format(
-                L"PLINE Specify next point (ENTER to finish) [CLOSE=%s]: ",
-                m_bPolylineClose ? L"ON" : L"OFF");
-            UpdateStatusBar();
-            Invalidate(FALSE);
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"C");
+            FinishPolylineCommand(true);
             return;
         }
         break;
 
     case VK_RETURN:
-        if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
-            CPolylineEntity* pPline = new CPolylineEntity(m_tempPts);
-            pPline->m_bClosed = m_bPolylineClose;
-            pDoc->AddEntity(pPline);
-    m_bPolylineClose = false;
-    m_pPendingDim = nullptr;
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 && !m_tempPts.empty()) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
             CompleteDrawCommand();
             Invalidate(FALSE);
         }
+        if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT && m_tempPts.size() >= 2) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
+            FinishPolylineCommand(false);
+        }
         if (pDoc->m_drawState == STATE_DRAW_ARC_PREVIEW && m_tempPts.size() >= 3) {
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+                RecordScriptInput(L"");
             // Build arc: tempPts[0]=start, [1]=center, [2]=end
             CPoint ptStart  = m_tempPts[0];
             CPoint ptCenter = m_tempPts[1];
@@ -2834,9 +3472,30 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
             CompleteDrawCommand();
             Invalidate(FALSE);
         }
+        if (pDoc->m_drawState == STATE_ARRAY_SELECT) {
+            if (pDoc->GetSelectedCount() > 0) {
+                UpdateArrayDefaultSpacingFromSelection();
+                SetDrawState(STATE_ARRAY_ROWS);
+            } else {
+                pDoc->m_strCommandPrompt = L"ARRAY: No objects selected";
+            }
+            UpdateStatusBar();
+            Invalidate(FALSE);
+        } else if (pDoc->m_drawState == STATE_ARRAY_ROWS) {
+            SetDrawState(STATE_ARRAY_COLUMNS);
+        } else if (pDoc->m_drawState == STATE_ARRAY_COLUMNS) {
+            SetDrawState(STATE_ARRAY_ROW_SPACING);
+        } else if (pDoc->m_drawState == STATE_ARRAY_ROW_SPACING) {
+            SetDrawState(STATE_ARRAY_COLUMN_SPACING);
+        } else if (pDoc->m_drawState == STATE_ARRAY_COLUMN_SPACING) {
+            CreateRectangularArray(m_nArrayRows, m_nArrayColumns,
+                                   m_dArrayRowSpacing, m_dArrayColumnSpacing);
+        }
         break;
 
     case VK_DELETE:
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+            RecordScriptInput(L"ERASE");
         pDoc->DeleteSelected();
         Invalidate(FALSE);
         break;
@@ -2848,6 +3507,14 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
             Invalidate(FALSE);
         } else if (pDoc->m_drawState == STATE_IDLE) {
             OnViewZoomWindow();
+        }
+        break;
+
+    case 'E':
+        if (pDoc->m_drawState == STATE_ZOOM_WINDOW_P1 ||
+            pDoc->m_drawState == STATE_ZOOM_WINDOW_P2) {
+            OnViewZoomExtents();
+            return;
         }
         break;
 
@@ -2869,24 +3536,44 @@ void CLargeHWView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
     case VK_F7:
         pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+            CString script;
+            script.Format(L"GRID %s", (LPCTSTR)FormatOnOff(pDoc->m_bShowGrid));
+            RecordScriptInput(script);
+        }
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F9:
         pDoc->m_bSnapToGrid = !pDoc->m_bSnapToGrid;
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+            CString script;
+            script.Format(L"SNAP %s", (LPCTSTR)FormatOnOff(pDoc->m_bSnapToGrid));
+            RecordScriptInput(script);
+        }
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F8:
         pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+            CString script;
+            script.Format(L"ORTHO %s", (LPCTSTR)FormatOnOff(pDoc->m_bOrthoMode));
+            RecordScriptInput(script);
+        }
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
 
     case VK_F3:
         pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+            CString script;
+            script.Format(L"OSNAP %s", (LPCTSTR)FormatOnOff(pDoc->m_bObjectSnap));
+            RecordScriptInput(script);
+        }
         UpdateStatusBar();
         Invalidate(FALSE);
         break;
@@ -2957,6 +3644,9 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
         menu.AppendMenu(MF_STRING, ID_MODIFY_ROTATE, L"Rotate");
         menu.AppendMenu(MF_STRING, ID_MODIFY_SCALE,  L"Scale");
         menu.AppendMenu(MF_STRING, ID_MODIFY_MIRROR, L"Mirror");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_CHAMFER, L"Chamfer");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_FILLET, L"Fillet");
+        menu.AppendMenu(MF_STRING, ID_MODIFY_ARRAY,  L"Array");
     }
 
     if (pt.x == -1 && pt.y == -1) {
@@ -2971,98 +3661,26 @@ void CLargeHWView::OnContextMenu(CWnd* pWnd, CPoint pt)
 // ============================================================
 // Draw command handlers
 // ============================================================
-void CLargeHWView::OnDrawLine()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_LINE; SetDrawState(STATE_DRAW_LINE_P1); }
-void CLargeHWView::OnDrawCircle()     { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_CIRCLE; SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
-void CLargeHWView::OnDrawArc()        { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
-void CLargeHWView::OnDrawRectangle()  { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
-void CLargeHWView::OnDrawEllipse()    { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
-void CLargeHWView::OnDrawPolyline()   { m_tempPts.clear(); m_bPolylineClose = false; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
+void CLargeHWView::OnDrawLine()       { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_LINE; SetDrawState(STATE_DRAW_LINE_P1); }
+void CLargeHWView::OnDrawCircle()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"CIRCLE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_CIRCLE; SetDrawState(STATE_DRAW_CIRCLE_CENTER); }
+void CLargeHWView::OnDrawArc()        { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ARC"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ARC; SetDrawState(STATE_DRAW_ARC_P1); }
+void CLargeHWView::OnDrawRectangle()  { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"RECTANGLE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_RECTANGLE; SetDrawState(STATE_DRAW_RECT_P1); }
+void CLargeHWView::OnDrawEllipse()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"ELLIPSE"); m_tempPts.clear(); m_nLastCommandID = ID_DRAW_ELLIPSE; SetDrawState(STATE_DRAW_ELLIPSE_CENTER); }
+void CLargeHWView::OnDrawPolyline()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"PLINE"); m_tempPts.clear(); m_pActivePolyline = nullptr; m_bPolylineClose = false; m_bPolylineArcMode = false; m_nPolylineWidth = max(1, GetDocument()->GetCurrentLineWidth()); m_nPolylineStartWidth = m_nPolylineWidth; m_nPolylineEndWidth = m_nPolylineWidth; m_nLastCommandID = ID_DRAW_POLYLINE; SetDrawState(STATE_DRAW_POLYLINE_POINT); }
 void CLargeHWView::OnDrawText()       { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_TEXT; SetDrawState(STATE_DRAW_TEXT_POS); }
-void CLargeHWView::OnDrawPolygon()    { m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
+void CLargeHWView::OnDrawPolygon()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"POLYGON"); m_tempPts.clear(); m_nPolygonSides = 6; m_nLastCommandID = ID_DRAW_POLYGON; SetDrawState(STATE_DRAW_POLYGON_CENTER); }
 void CLargeHWView::OnDrawDimLength()  { OnDrawDimLengthAligned(); }
 void CLargeHWView::OnDrawDimLengthAligned() { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 0; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
 void CLargeHWView::OnDrawDimLengthHoriz() { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 1; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
 void CLargeHWView::OnDrawDimLengthVert()  { m_tempPts.clear(); m_nLastCommandID = ID_DRAW_DIMENSION_LENGTH; m_nLastDimMode = 2; SetDrawState(STATE_DRAW_DIM_LENGTH_P1); }
-void CLargeHWView::OnDrawDimAngle()   
-{
-    m_tempPts.clear();
-    m_nLastCommandID = ID_DRAW_DIMENSION_ANGLE;
-    m_pDimEnt1 = nullptr; m_pDimEnt2 = nullptr;
-    // create temporary split segments up-front so user can click/select split pieces immediately
-    CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc) {
-        // if there are old temp splits, remove them first
-        if (!m_tempSplitNewIDs.empty()) {
-            RestoreTemporarySplits(pDoc, m_tempSplitNewIDs);
-            m_tempSplitNewIDs.clear();
-        }
-        // create temporary split segments but do NOT select them; selection should occur on user clicks
-        CreateTemporarySplits(pDoc, m_tempSplitNewIDs);
-    }
-    SetDrawState(STATE_DRAW_DIM_ANGLE_SELECT_E1);
-}
-
-void CLargeHWView::OnDrawDimRadius()
-{
-    m_tempPts.clear();
-    m_nLastCommandID = ID_DRAW_DIMENSION_RADIUS;
-    m_pDimRadiusSrcEnt = nullptr;
-    m_pPendingDim = nullptr;
-    CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc) {
-        pDoc->DeselectAll();
-        pDoc->m_strCommandPrompt = L"Select circle or arc: ";
-    }
-    SetDrawState(STATE_DRAW_DIM_RADIUS_SELECT);
-}
-
-void CLargeHWView::OnDrawDimDiameter()
-{
-    m_tempPts.clear();
-    m_nLastCommandID = ID_DRAW_DIMENSION_DIAMETER;
-    m_pDimDiamSrcEnt = nullptr;
-    m_pPendingDim = nullptr;
-    CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc) {
-        pDoc->DeselectAll();
-        pDoc->m_strCommandPrompt = L"Select circle or arc: ";
-    }
-    SetDrawState(STATE_DRAW_DIM_DIAMETER_SELECT);
-}
-
-void CLargeHWView::OnDrawDimArcLength()
-{
-    m_tempPts.clear();
-    m_nLastCommandID = ID_DRAW_DIMENSION_ARCLENGTH;
-    m_pDimArcLenSrcEnt = nullptr;
-    m_pPendingDim = nullptr;
-    CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc) {
-        pDoc->DeselectAll();
-        pDoc->m_strCommandPrompt = L"Select arc: ";
-    }
-    SetDrawState(STATE_DRAW_DIM_ARCLEN_SELECT);
-}
-
-void CLargeHWView::OnDrawDimCoordinate()
-{
-    m_tempPts.clear();
-    m_nLastCommandID = ID_DRAW_DIMENSION_COORDINATE;
-    m_bCoordDimMode = true;
-    m_ptCoordPoint = CPoint(0, 0);
-    m_pPendingDim = nullptr;
-    CLargeHWDoc* pDoc = GetDocument();
-    if (pDoc) {
-        pDoc->m_strCommandPrompt = L"Specify point: ";
-    }
-    SetDrawState(STATE_DRAW_DIM_COORD_PICK);
-}
 
 // ============================================================
 // Modify command handlers
 // ============================================================
 void CLargeHWView::OnModifyMove()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"MOVE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_MOVE;
@@ -3080,6 +3698,8 @@ void CLargeHWView::OnModifyMove()
 
 void CLargeHWView::OnModifyCopy()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"COPY");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_COPY;
@@ -3097,6 +3717,8 @@ void CLargeHWView::OnModifyCopy()
 
 void CLargeHWView::OnModifyDelete()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ERASE");
     CLargeHWDoc* pDoc = GetDocument();
     int nSel = pDoc->GetSelectedCount();
     TRACE(L"[DEBUG] OnModifyDelete called, selected=%d\n", nSel);
@@ -3106,6 +3728,8 @@ void CLargeHWView::OnModifyDelete()
 
 void CLargeHWView::OnModifyRotate()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ROTATE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_ROTATE;
@@ -3122,6 +3746,8 @@ void CLargeHWView::OnModifyRotate()
 
 void CLargeHWView::OnModifyScale()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"SCALE");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_SCALE;
@@ -3138,6 +3764,8 @@ void CLargeHWView::OnModifyScale()
 
 void CLargeHWView::OnModifyMirror()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"MIRROR");
     m_tempPts.clear();
     CLargeHWDoc* pDoc = GetDocument();
     m_nLastCommandID = ID_MODIFY_MIRROR;
@@ -3154,10 +3782,741 @@ void CLargeHWView::OnModifyMirror()
 
 void CLargeHWView::OnModifyOffset()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"OFFSET");
     m_tempPts.clear();
     m_nLastCommandID = ID_MODIFY_OFFSET;
     TRACE(L"[DEBUG] OnModifyOffset called, state=STATE_OFFSET_SELECT\n");
     SetDrawState(STATE_OFFSET_SELECT);
+}
+
+void CLargeHWView::OnModifyChamfer()
+{
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"CHAMFER");
+    m_tempPts.clear();
+    m_pChamferFirst = nullptr;
+    m_chamferFirstSegment = ChamferSegmentRef();
+    m_nLastCommandID = ID_MODIFY_CHAMFER;
+    SetDrawState(STATE_CHAMFER_SELECT_FIRST);
+}
+
+void CLargeHWView::OnModifyFillet()
+{
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"FILLET");
+    m_tempPts.clear();
+    m_filletFirstSegment = ChamferSegmentRef();
+    m_nLastCommandID = ID_MODIFY_FILLET;
+    SetDrawState(STATE_FILLET_SELECT_FIRST);
+}
+
+void CLargeHWView::OnModifyArray()
+{
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ARRAY");
+    m_tempPts.clear();
+    m_nLastCommandID = ID_MODIFY_ARRAY;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc && pDoc->GetSelectedCount() > 0) {
+        UpdateArrayDefaultSpacingFromSelection();
+        SetDrawState(STATE_ARRAY_ROWS);
+    } else {
+        SetDrawState(STATE_ARRAY_SELECT);
+    }
+}
+
+CLineEntity* CLargeHWView::HitTestLineEntity(CPoint point) const
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return nullptr;
+
+    CLineEntity* pBest = nullptr;
+    double bestDist = DBL_MAX;
+
+    const auto& ents = pDoc->GetEntities();
+    for (auto it = ents.rbegin(); it != ents.rend(); ++it) {
+        CEntity* pEnt = *it;
+        if (!pEnt || !pEnt->m_bVisible || pEnt->m_Type != ENT_LINE)
+            continue;
+
+        CLineEntity* pLine = static_cast<CLineEntity*>(pEnt);
+        CPoint p1 = pLine->ToScreen(pLine->m_ptStart, pDoc->m_dScale, pDoc->m_ptOffset);
+        CPoint p2 = pLine->ToScreen(pLine->m_ptEnd, pDoc->m_dScale, pDoc->m_ptOffset);
+        double dist = PointToLineDistance(point, p1, p2);
+        double tolerance = max(12.0, (double)pLine->m_nLineWidth + 8.0);
+        if (dist <= tolerance && dist < bestDist) {
+            bestDist = dist;
+            pBest = pLine;
+        }
+    }
+
+    return pBest;
+}
+
+CLargeHWView::ChamferSegmentRef CLargeHWView::HitTestChamferSegment(CPoint point) const
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    ChamferSegmentRef best;
+    if (!pDoc) return best;
+
+    double bestDist = DBL_MAX;
+    auto considerSegment = [&](CEntity* pEnt, int segmentIndex, CPoint start, CPoint end) {
+        if (!pEnt || !pEnt->m_bVisible)
+            return;
+
+        CPoint p1 = pEnt->ToScreen(start, pDoc->m_dScale, pDoc->m_ptOffset);
+        CPoint p2 = pEnt->ToScreen(end, pDoc->m_dScale, pDoc->m_ptOffset);
+        double dist = PointToLineDistance(point, p1, p2);
+        double tolerance = max(12.0, (double)pEnt->m_nLineWidth + 8.0);
+        if (dist <= tolerance && dist < bestDist) {
+            bestDist = dist;
+            best.pEntity = pEnt;
+            best.segmentIndex = segmentIndex;
+            best.start = start;
+            best.end = end;
+        }
+    };
+
+    const auto& ents = pDoc->GetEntities();
+    for (auto it = ents.rbegin(); it != ents.rend(); ++it) {
+        CEntity* pEnt = *it;
+        if (!pEnt || !pEnt->m_bVisible)
+            continue;
+
+        if (pEnt->m_Type == ENT_LINE) {
+            CLineEntity* pLine = static_cast<CLineEntity*>(pEnt);
+            considerSegment(pEnt, 0, pLine->m_ptStart, pLine->m_ptEnd);
+        } else if (pEnt->m_Type == ENT_RECTANGLE) {
+            CRectangleEntity* pRect = static_cast<CRectangleEntity*>(pEnt);
+            CRect rc(pRect->m_ptCorner1, pRect->m_ptCorner2);
+            rc.NormalizeRect();
+            CPoint vertices[4] = {
+                rc.TopLeft(),
+                CPoint(rc.right, rc.top),
+                rc.BottomRight(),
+                CPoint(rc.left, rc.bottom)
+            };
+            for (int i = 0; i < 4; ++i)
+                considerSegment(pEnt, i, vertices[i], vertices[(i + 1) % 4]);
+        } else if (pEnt->m_Type == ENT_POLYLINE) {
+            CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(pEnt);
+            int n = (int)pPoly->m_vertices.size();
+            for (int i = 0; i < n - 1; ++i)
+                considerSegment(pEnt, i, pPoly->m_vertices[i], pPoly->m_vertices[i + 1]);
+            if (pPoly->m_bClosed && n > 2)
+                considerSegment(pEnt, n - 1, pPoly->m_vertices[n - 1], pPoly->m_vertices[0]);
+        }
+    }
+
+    return best;
+}
+
+bool CLargeHWView::ApplyChamfer(CLineEntity* pFirst, CLineEntity* pSecond, double distance)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || !pFirst || !pSecond || pFirst == pSecond)
+        return false;
+
+    double ix = 0.0;
+    double iy = 0.0;
+    if (!IntersectInfiniteLines(pFirst->m_ptStart, pFirst->m_ptEnd,
+                                pSecond->m_ptStart, pSecond->m_ptEnd, ix, iy)) {
+        pDoc->m_strCommandPrompt = L"CHAMFER: Lines are parallel, cancelled";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    CPoint firstTrimEnd;
+    CPoint secondTrimEnd;
+    CPoint pChamfer1 = ChamferPointOnSegment(pFirst->m_ptStart, pFirst->m_ptEnd,
+                                             ix, iy, distance, firstTrimEnd);
+    CPoint pChamfer2 = ChamferPointOnSegment(pSecond->m_ptStart, pSecond->m_ptEnd,
+                                             ix, iy, distance, secondTrimEnd);
+    if (Distance(pChamfer1, pChamfer2) <= 0.5) {
+        pDoc->m_strCommandPrompt = L"CHAMFER: distance too small or segment too short";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    pFirst->m_bSelected = true;
+    pSecond->m_bSelected = true;
+    pDoc->RecordModifyUndo();
+
+    if (firstTrimEnd == pFirst->m_ptStart) pFirst->m_ptStart = pChamfer1;
+    else pFirst->m_ptEnd = pChamfer1;
+
+    if (secondTrimEnd == pSecond->m_ptStart) pSecond->m_ptStart = pChamfer2;
+    else pSecond->m_ptEnd = pChamfer2;
+
+    std::vector<int> newIDs;
+    if (Distance(pChamfer1, pChamfer2) > 0.5) {
+        CLineEntity* pChamfer = new CLineEntity(pChamfer1, pChamfer2);
+        pDoc->AddEntity(pChamfer, false);
+        newIDs.push_back(pChamfer->m_nID);
+        pDoc->RecordCreateUndo(newIDs);
+    } else {
+        pDoc->SetModified(true);
+    }
+
+    pDoc->DeselectAll();
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt.Format(L"Chamfer created (distance=%.0f)", distance);
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+bool CLargeHWView::ApplyChamfer(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double distance)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || !first.IsValid() || !second.IsValid())
+        return false;
+
+    double ix = 0.0;
+    double iy = 0.0;
+    if (!IntersectInfiniteLines(first.start, first.end, second.start, second.end, ix, iy)) {
+        pDoc->m_strCommandPrompt = L"CHAMFER: Segments are parallel, cancelled";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    CPoint firstTrimEnd;
+    CPoint secondTrimEnd;
+    CPoint pChamfer1 = ChamferPointOnSegment(first.start, first.end,
+                                             ix, iy, distance, firstTrimEnd);
+    CPoint pChamfer2 = ChamferPointOnSegment(second.start, second.end,
+                                             ix, iy, distance, secondTrimEnd);
+    if (Distance(pChamfer1, pChamfer2) <= 0.5) {
+        pDoc->m_strCommandPrompt = L"CHAMFER: distance too small or segment too short";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    auto copyProps = [](CEntity* dst, const CEntity* src) {
+        if (!dst || !src) return;
+        dst->m_color = src->m_color;
+        dst->m_nLineStyle = src->m_nLineStyle;
+        dst->m_nLineWidth = src->m_nLineWidth;
+        dst->m_strLayer = src->m_strLayer;
+        dst->m_bVisible = src->m_bVisible;
+        dst->m_bUseLayerColor = src->m_bUseLayerColor;
+    };
+
+    auto rectangleVertices = [](CRectangleEntity* pRect) {
+        std::vector<CPoint> vertices;
+        CRect rc(pRect->m_ptCorner1, pRect->m_ptCorner2);
+        rc.NormalizeRect();
+        vertices.push_back(rc.TopLeft());
+        vertices.push_back(CPoint(rc.right, rc.top));
+        vertices.push_back(rc.BottomRight());
+        vertices.push_back(CPoint(rc.left, rc.bottom));
+        return vertices;
+    };
+
+    auto buildChamferedVertices = [&](const std::vector<CPoint>& vertices, bool closed,
+                                      int segA, int segB, CPoint chamferA, CPoint chamferB,
+                                      std::vector<CPoint>& newVertices) -> bool {
+        int n = (int)vertices.size();
+        if (n < 3) return false;
+
+        int aNext = closed ? (segA + 1) % n : segA + 1;
+        int bNext = closed ? (segB + 1) % n : segB + 1;
+        int corner = -1;
+        CPoint firstPoint;
+        CPoint secondPoint;
+
+        if (aNext == segB) {
+            corner = segB;
+            firstPoint = chamferA;
+            secondPoint = chamferB;
+        } else if (bNext == segA) {
+            corner = segA;
+            firstPoint = chamferB;
+            secondPoint = chamferA;
+        } else {
+            return false;
+        }
+
+        newVertices.clear();
+        for (int i = 0; i < n; ++i) {
+            if (i == corner) {
+                newVertices.push_back(firstPoint);
+                newVertices.push_back(secondPoint);
+            } else {
+                newVertices.push_back(vertices[i]);
+            }
+        }
+        return true;
+    };
+
+    if (first.pEntity == second.pEntity &&
+        (first.pEntity->m_Type == ENT_RECTANGLE || first.pEntity->m_Type == ENT_POLYLINE)) {
+        std::vector<CPoint> vertices;
+        bool closed = true;
+        if (first.pEntity->m_Type == ENT_RECTANGLE) {
+            vertices = rectangleVertices(static_cast<CRectangleEntity*>(first.pEntity));
+            closed = true;
+        } else {
+            CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(first.pEntity);
+            vertices = pPoly->m_vertices;
+            closed = pPoly->m_bClosed;
+        }
+
+        std::vector<CPoint> newVertices;
+        if (buildChamferedVertices(vertices, closed,
+                                   first.segmentIndex, second.segmentIndex,
+                                   pChamfer1, pChamfer2, newVertices)) {
+            if (first.pEntity->m_Type == ENT_POLYLINE) {
+                first.pEntity->m_bSelected = true;
+                pDoc->RecordModifyUndo();
+                first.pEntity->m_bSelected = false;
+                CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(first.pEntity);
+                pPoly->m_vertices = newVertices;
+                pPoly->m_bClosed = closed;
+                pDoc->SetModified(true);
+            } else {
+                CPolylineEntity* pNew = new CPolylineEntity(newVertices);
+                pNew->m_bClosed = true;
+                copyProps(pNew, first.pEntity);
+                pDoc->ReplaceEntity(first.pEntity->m_nID, pNew, true);
+            }
+
+            pDoc->DeselectAll();
+            CompleteDrawCommand();
+            pDoc->m_strCommandPrompt.Format(L"Chamfered composite corner (distance=%.0f)", distance);
+            UpdateStatusBar();
+            Invalidate(FALSE);
+            return true;
+        }
+    }
+
+    if (first.pEntity->m_Type == ENT_RECTANGLE || first.pEntity->m_Type == ENT_POLYLINE ||
+        second.pEntity->m_Type == ENT_RECTANGLE || second.pEntity->m_Type == ENT_POLYLINE) {
+        pDoc->m_strCommandPrompt = L"CHAMFER: Rectangle/polyline segments must be adjacent";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    first.pEntity->m_bSelected = true;
+    second.pEntity->m_bSelected = true;
+    pDoc->RecordModifyUndo();
+
+    auto trimSegmentEndpoint = [](const ChamferSegmentRef& seg, CPoint trimEnd, CPoint newPt) {
+        if (seg.pEntity->m_Type == ENT_LINE) {
+            CLineEntity* pLine = static_cast<CLineEntity*>(seg.pEntity);
+            if (trimEnd == seg.start) pLine->m_ptStart = newPt;
+            else pLine->m_ptEnd = newPt;
+        } else if (seg.pEntity->m_Type == ENT_POLYLINE) {
+            CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(seg.pEntity);
+            int n = (int)pPoly->m_vertices.size();
+            if (n <= 0) return;
+            int startIndex = seg.segmentIndex;
+            int endIndex = (seg.segmentIndex + 1) % n;
+            if (trimEnd == seg.start) pPoly->m_vertices[startIndex] = newPt;
+            else pPoly->m_vertices[endIndex] = newPt;
+        }
+    };
+
+    trimSegmentEndpoint(first, firstTrimEnd, pChamfer1);
+    trimSegmentEndpoint(second, secondTrimEnd, pChamfer2);
+
+    std::vector<int> newIDs;
+    if (Distance(pChamfer1, pChamfer2) > 0.5) {
+        CLineEntity* pChamfer = new CLineEntity(pChamfer1, pChamfer2);
+        copyProps(pChamfer, first.pEntity);
+        pDoc->AddEntity(pChamfer, false);
+        newIDs.push_back(pChamfer->m_nID);
+        pDoc->RecordCreateUndo(newIDs);
+    }
+
+    pDoc->DeselectAll();
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt.Format(L"Chamfer created (distance=%.0f)", distance);
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+bool CLargeHWView::ApplyFillet(const ChamferSegmentRef& first, const ChamferSegmentRef& second, double radius)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || !first.IsValid() || !second.IsValid())
+        return false;
+
+    CPoint trim1, trim2, tan1, tan2, center;
+    int actualRadius = 0;
+    if (!ComputeFilletGeometry(first.start, first.end, second.start, second.end,
+                               radius, trim1, trim2, tan1, tan2, center, actualRadius)) {
+        pDoc->m_strCommandPrompt = L"FILLET: invalid radius or parallel segments";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    auto copyProps = [](CEntity* dst, const CEntity* src) {
+        if (!dst || !src) return;
+        dst->m_color = src->m_color;
+        dst->m_nLineStyle = src->m_nLineStyle;
+        dst->m_nLineWidth = src->m_nLineWidth;
+        dst->m_strLayer = src->m_strLayer;
+        dst->m_bVisible = src->m_bVisible;
+        dst->m_bUseLayerColor = src->m_bUseLayerColor;
+    };
+
+    auto rectangleVertices = [](CRectangleEntity* pRect) {
+        std::vector<CPoint> vertices;
+        CRect rc(pRect->m_ptCorner1, pRect->m_ptCorner2);
+        rc.NormalizeRect();
+        vertices.push_back(rc.TopLeft());
+        vertices.push_back(CPoint(rc.right, rc.top));
+        vertices.push_back(rc.BottomRight());
+        vertices.push_back(CPoint(rc.left, rc.bottom));
+        return vertices;
+    };
+
+    auto buildFilletedVertices = [&](const std::vector<CPoint>& vertices, bool closed,
+                                     int segA, int segB, CPoint arcStart, CPoint arcEnd,
+                                     std::vector<CPoint>& newVertices) -> bool {
+        int n = (int)vertices.size();
+        if (n < 3) return false;
+
+        int aNext = closed ? (segA + 1) % n : segA + 1;
+        int bNext = closed ? (segB + 1) % n : segB + 1;
+        int corner = -1;
+        CPoint firstArcPoint, secondArcPoint;
+
+        if (aNext == segB) {
+            corner = segB;
+            firstArcPoint = arcStart;
+            secondArcPoint = arcEnd;
+        } else if (bNext == segA) {
+            corner = segA;
+            firstArcPoint = arcEnd;
+            secondArcPoint = arcStart;
+        } else {
+            return false;
+        }
+
+        newVertices.clear();
+        for (int i = 0; i < n; ++i) {
+            if (i == corner) {
+                AppendArcApprox(newVertices, center, actualRadius, firstArcPoint, secondArcPoint);
+            } else {
+                newVertices.push_back(vertices[i]);
+            }
+        }
+        return true;
+    };
+
+    if (first.pEntity == second.pEntity &&
+        (first.pEntity->m_Type == ENT_RECTANGLE || first.pEntity->m_Type == ENT_POLYLINE)) {
+        std::vector<CPoint> vertices;
+        bool closed = true;
+        if (first.pEntity->m_Type == ENT_RECTANGLE) {
+            vertices = rectangleVertices(static_cast<CRectangleEntity*>(first.pEntity));
+            closed = true;
+        } else {
+            CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(first.pEntity);
+            vertices = pPoly->m_vertices;
+            closed = pPoly->m_bClosed;
+        }
+
+        std::vector<CPoint> newVertices;
+        if (buildFilletedVertices(vertices, closed, first.segmentIndex, second.segmentIndex,
+                                  tan1, tan2, newVertices)) {
+            if (first.pEntity->m_Type == ENT_POLYLINE) {
+                first.pEntity->m_bSelected = true;
+                pDoc->RecordModifyUndo();
+                first.pEntity->m_bSelected = false;
+                CPolylineEntity* pPoly = static_cast<CPolylineEntity*>(first.pEntity);
+                pPoly->m_vertices = newVertices;
+                pPoly->m_bClosed = closed;
+                pDoc->SetModified(true);
+            } else {
+                CPolylineEntity* pNew = new CPolylineEntity(newVertices);
+                pNew->m_bClosed = true;
+                copyProps(pNew, first.pEntity);
+                pDoc->ReplaceEntity(first.pEntity->m_nID, pNew, true);
+            }
+
+            pDoc->DeselectAll();
+            CompleteDrawCommand();
+            pDoc->m_strCommandPrompt.Format(L"Fillet created (radius=%.0f)", radius);
+            UpdateStatusBar();
+            Invalidate(FALSE);
+            return true;
+        }
+    }
+
+    if (first.pEntity->m_Type != ENT_LINE || second.pEntity->m_Type != ENT_LINE) {
+        pDoc->m_strCommandPrompt = L"FILLET: Rectangle/polyline segments must be adjacent";
+        pDoc->DeselectAll();
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return false;
+    }
+
+    first.pEntity->m_bSelected = true;
+    second.pEntity->m_bSelected = true;
+    pDoc->RecordModifyUndo();
+    first.pEntity->m_bSelected = false;
+    second.pEntity->m_bSelected = false;
+
+    CLineEntity* line1 = static_cast<CLineEntity*>(first.pEntity);
+    CLineEntity* line2 = static_cast<CLineEntity*>(second.pEntity);
+    if (trim1 == first.start) line1->m_ptStart = tan1;
+    else line1->m_ptEnd = tan1;
+    if (trim2 == second.start) line2->m_ptStart = tan2;
+    else line2->m_ptEnd = tan2;
+
+    double a1 = atan2((double)(tan1.y - center.y), (double)(tan1.x - center.x));
+    double a2 = atan2((double)(tan2.y - center.y), (double)(tan2.x - center.x));
+    CArcEntity* arc = new CArcEntity();
+    arc->SetArcByCenter(center, actualRadius, a1, a2);
+    copyProps(arc, first.pEntity);
+    pDoc->AddEntity(arc, false);
+    std::vector<int> ids;
+    ids.push_back(arc->m_nID);
+    pDoc->RecordCreateUndo(ids);
+
+    pDoc->DeselectAll();
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt.Format(L"Fillet created (radius=%.0f)", radius);
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+bool CLargeHWView::UpdateArrayDefaultSpacingFromSelection()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->GetSelectedCount() == 0)
+        return false;
+
+    CRect bounds(INT_MAX, INT_MAX, INT_MIN, INT_MIN);
+    for (auto* pEnt : pDoc->GetSelectedEntities()) {
+        if (!pEnt)
+            continue;
+
+        CRect eb = pEnt->GetBounds();
+        if (eb.left < bounds.left) bounds.left = eb.left;
+        if (eb.top < bounds.top) bounds.top = eb.top;
+        if (eb.right > bounds.right) bounds.right = eb.right;
+        if (eb.bottom > bounds.bottom) bounds.bottom = eb.bottom;
+    }
+
+    if (bounds.left == INT_MAX)
+        return false;
+
+    int gap = max(pDoc->m_nGridSpacing, ScriptRound(GetModelUnitScale(pDoc)));
+    m_dArrayColumnSpacing = max(1, bounds.Width() + gap);
+    m_dArrayRowSpacing = max(1, bounds.Height() + gap);
+    return true;
+}
+
+void CLargeHWView::CreateRectangularArray(int rows, int columns, double rowSpacing, double columnSpacing)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    rows = max(1, rows);
+    columns = max(1, columns);
+    auto selectedEnts = pDoc->GetSelectedEntities();
+    if (selectedEnts.empty() || (rows == 1 && columns == 1)) {
+        pDoc->m_strCommandPrompt = L"ARRAY: No copies created";
+        CompleteDrawCommand();
+        UpdateStatusBar();
+        return;
+    }
+
+    std::vector<int> newIDs;
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < columns; ++c) {
+            if (r == 0 && c == 0)
+                continue;
+
+            double dx = c * columnSpacing;
+            double dy = r * rowSpacing;
+            for (auto* pEnt : selectedEnts) {
+                CEntity* pCopy = pEnt->Clone();
+                if (!pCopy) continue;
+                pCopy->m_bSelected = false;
+                pCopy->Move(dx, dy);
+                pDoc->AddEntity(pCopy, false);
+                newIDs.push_back(pCopy->m_nID);
+            }
+        }
+    }
+
+    pDoc->RecordCreateUndo(newIDs);
+    pDoc->DeselectAll();
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt.Format(L"Array created: %d rows x %d columns, %d copies",
+                                    rows, columns, (int)newIDs.size());
+    UpdateStatusBar();
+    Invalidate(FALSE);
+}
+
+bool CLargeHWView::CloseLineCommand()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState != STATE_DRAW_LINE_P2 || m_tempPts.size() < 2)
+        return false;
+
+    CPoint firstPt = m_tempPts.front();
+    CPoint lastPt = m_tempPts.back();
+    if (Distance(firstPt, lastPt) <= 0.5)
+        return false;
+
+    CLineEntity* pLine = new CLineEntity(lastPt, firstPt);
+    pDoc->AddEntity(pLine);
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt = L"LINE closed";
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+void CLargeHWView::AddPolylinePoint(CPoint world)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    if (m_tempPts.empty()) {
+        m_tempPts.push_back(world);
+        return;
+    }
+
+    CPoint start = m_tempPts.back();
+    std::vector<CPoint> newPts;
+    newPts.push_back(start);
+    if (m_bPolylineArcMode)
+        AppendPolylineArcApprox(newPts, start, world);
+    else
+        newPts.push_back(world);
+
+    if (!m_pActivePolyline) {
+        std::vector<CPoint> initPts;
+        initPts.push_back(start);
+        m_pActivePolyline = new CPolylineEntity(initPts);
+        m_pActivePolyline->m_vertexWidths.assign(1, max(1, m_nPolylineStartWidth));
+        pDoc->AddEntity(m_pActivePolyline);
+    }
+
+    if ((int)m_pActivePolyline->m_vertexWidths.size() < (int)m_pActivePolyline->m_vertices.size())
+        m_pActivePolyline->m_vertexWidths.resize(m_pActivePolyline->m_vertices.size(), max(1, m_nPolylineWidth));
+
+    if (!m_pActivePolyline->m_vertices.empty())
+        m_pActivePolyline->SetVertexWidth((int)m_pActivePolyline->m_vertices.size() - 1, m_nPolylineStartWidth);
+
+    int countToAdd = (int)newPts.size() - 1;
+    for (int i = 1; i < (int)newPts.size(); ++i) {
+        double t = countToAdd <= 1 ? 1.0 : (double)i / countToAdd;
+        int w = max(1, (int)(m_nPolylineStartWidth +
+                             (m_nPolylineEndWidth - m_nPolylineStartWidth) * t + 0.5));
+        m_pActivePolyline->AddVertex(newPts[i], w);
+        m_tempPts.push_back(newPts[i]);
+    }
+
+    m_nPolylineWidth = max(1, m_nPolylineEndWidth);
+    m_nPolylineStartWidth = m_nPolylineWidth;
+    m_nPolylineEndWidth = m_nPolylineWidth;
+    pDoc->SetModified(true);
+    Invalidate(FALSE);
+}
+
+bool CLargeHWView::FinishPolylineCommand(bool close)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState != STATE_DRAW_POLYLINE_POINT)
+        return false;
+
+    if (close && m_pActivePolyline && m_pActivePolyline->GetVertexCount() >= 3)
+        m_pActivePolyline->m_bClosed = true;
+
+    m_bPolylineClose = false;
+    m_bPolylineArcMode = false;
+    CompleteDrawCommand();
+    pDoc->m_strCommandPrompt = close ? L"PLINE closed" : L"PLINE finished";
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
+}
+
+bool CLargeHWView::ProcessArrayParameterInput(const CString& strInput)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return false;
+
+    CString s = strInput;
+    s.Trim();
+    if (s.IsEmpty()) return false;
+
+    CadDrawState state = pDoc->m_drawState;
+    if (state != STATE_ARRAY_ROWS &&
+        state != STATE_ARRAY_COLUMNS &&
+        state != STATE_ARRAY_ROW_SPACING &&
+        state != STATE_ARRAY_COLUMN_SPACING) {
+        return false;
+    }
+
+    double modelUnitScale = GetModelUnitScale(pDoc);
+    double value = 0.0;
+    CPoint pt;
+    bool hasNumber = TryParseDoubleStrict(s, value);
+    bool hasPoint = TryParseScriptPoint(s, CPoint(0, 0), pt, modelUnitScale);
+
+    switch (state) {
+    case STATE_ARRAY_ROWS:
+        if (!hasNumber) return false;
+        m_nArrayRows = max(1, abs((int)value));
+        SetDrawState(STATE_ARRAY_COLUMNS);
+        return true;
+
+    case STATE_ARRAY_COLUMNS:
+        if (!hasNumber) return false;
+        m_nArrayColumns = max(1, abs((int)value));
+        SetDrawState(STATE_ARRAY_ROW_SPACING);
+        return true;
+
+    case STATE_ARRAY_ROW_SPACING:
+        if (hasNumber) {
+            m_dArrayRowSpacing = value * modelUnitScale;
+        } else if (hasPoint) {
+            m_dArrayRowSpacing = pt.y;
+        } else {
+            return false;
+        }
+        SetDrawState(STATE_ARRAY_COLUMN_SPACING);
+        return true;
+
+    case STATE_ARRAY_COLUMN_SPACING:
+        if (hasNumber) {
+            m_dArrayColumnSpacing = value * modelUnitScale;
+        } else if (hasPoint) {
+            m_dArrayColumnSpacing = pt.x;
+        } else {
+            return false;
+        }
+        CreateRectangularArray(m_nArrayRows, m_nArrayColumns,
+                               m_dArrayRowSpacing, m_dArrayColumnSpacing);
+        return true;
+
+    default:
+        return false;
+    }
 }
 
 // ============================================================
@@ -3165,6 +4524,8 @@ void CLargeHWView::OnModifyOffset()
 // ============================================================
 void CLargeHWView::OnEditUndo()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"UNDO");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Undo();
     UpdateStatusBar();
@@ -3173,6 +4534,8 @@ void CLargeHWView::OnEditUndo()
 
 void CLargeHWView::OnEditRedo()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"REDO");
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->Redo();
     UpdateStatusBar();
@@ -3204,7 +4567,14 @@ void CLargeHWView::OnEditSelectAll()
 // ============================================================
 void CLargeHWView::OnViewZoomExtents()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ZOOME");
     CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+    m_tempPts.clear();
+    m_bDrawing = false;
+    m_bDragging = false;
+    pDoc->m_drawState = STATE_IDLE;
     const auto& ents = pDoc->GetEntities();
     if (ents.empty()) return;
 
@@ -3217,24 +4587,19 @@ void CLargeHWView::OnViewZoomExtents()
         if (eb.bottom > bounds.bottom) bounds.bottom = eb.bottom;
     }
     if (bounds.left == INT_MAX) return;
-    bounds.InflateRect(50, 50);
 
     CRect rcClient;
     GetClientRect(&rcClient);
 
-    double sx = (double)rcClient.Width() / bounds.Width();
-    double sy = (double)rcClient.Height() / bounds.Height();
-    pDoc->m_dScale = min(sx, sy);
-    pDoc->m_ptOffset = CPoint(
-        (int)(-bounds.left * pDoc->m_dScale),
-        (int)(-bounds.top * pDoc->m_dScale)
-    );
+    FitViewToWorldBounds(pDoc, bounds, rcClient, 24);
     UpdateStatusBar();
     Invalidate(FALSE);
 }
 
 void CLargeHWView::OnViewZoomWindow()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ZOOM");
     m_tempPts.clear();
     m_nLastCommandID = ID_VIEW_ZOOM_WINDOW;
     SetDrawState(STATE_ZOOM_WINDOW_P1);
@@ -3242,6 +4607,8 @@ void CLargeHWView::OnViewZoomWindow()
 
 void CLargeHWView::OnViewPan()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"PAN");
     m_nLastCommandID = ID_VIEW_PAN;
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_strCommandPrompt = L"PAN: Hold and drag middle mouse button to pan. Press Esc to cancel.";
@@ -3252,6 +4619,11 @@ void CLargeHWView::OnViewGrid()
 {
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bShowGrid = !pDoc->m_bShowGrid;
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+        CString script;
+        script.Format(L"GRID %s", (LPCTSTR)FormatOnOff(pDoc->m_bShowGrid));
+        RecordScriptInput(script);
+    }
     UpdateStatusBar();
     Invalidate(FALSE);
 }
@@ -3260,6 +4632,11 @@ void CLargeHWView::OnViewSnap()
 {
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bSnapToGrid = !pDoc->m_bSnapToGrid;
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+        CString script;
+        script.Format(L"SNAP %s", (LPCTSTR)FormatOnOff(pDoc->m_bSnapToGrid));
+        RecordScriptInput(script);
+    }
     UpdateStatusBar();
 }
 
@@ -3267,34 +4644,42 @@ void CLargeHWView::OnViewOrtho()
 {
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->m_bOrthoMode = !pDoc->m_bOrthoMode;
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+        CString script;
+        script.Format(L"ORTHO %s", (LPCTSTR)FormatOnOff(pDoc->m_bOrthoMode));
+        RecordScriptInput(script);
+    }
     UpdateStatusBar();
 }
 
 // ============================================================
 // Property commands
 // ============================================================
-void CLargeHWView::OnColorRed()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 50, 50));   m_currentColor = RGB(255, 50, 50);   UpdateStatusBar(); }
-void CLargeHWView::OnColorYellow()  { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 255, 50));  m_currentColor = RGB(255, 255, 50);  UpdateStatusBar(); }
-void CLargeHWView::OnColorGreen()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 255, 50));   m_currentColor = RGB(50, 255, 50);   UpdateStatusBar(); }
-void CLargeHWView::OnColorCyan()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(0, 255, 209));   m_currentColor = RGB(0, 255, 209);   UpdateStatusBar(); }
-void CLargeHWView::OnColorBlue()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 100, 255));  m_currentColor = RGB(50, 100, 255);  UpdateStatusBar(); }
-void CLargeHWView::OnColorMagenta() { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 0, 127));   m_currentColor = RGB(255, 0, 127);   UpdateStatusBar(); }
-void CLargeHWView::OnColorWhite()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(240, 240, 240)); m_currentColor = RGB(240, 240, 240); UpdateStatusBar(); }
+void CLargeHWView::OnColorRed()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR RED");     CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 50, 50));   m_currentColor = RGB(255, 50, 50);   UpdateStatusBar(); }
+void CLargeHWView::OnColorYellow()  { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR YELLOW");  CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 255, 50));  m_currentColor = RGB(255, 255, 50);  UpdateStatusBar(); }
+void CLargeHWView::OnColorGreen()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR GREEN");   CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 255, 50));   m_currentColor = RGB(50, 255, 50);   UpdateStatusBar(); }
+void CLargeHWView::OnColorCyan()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR CYAN");    CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(0, 255, 209));   m_currentColor = RGB(0, 255, 209);   UpdateStatusBar(); }
+void CLargeHWView::OnColorBlue()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR BLUE");    CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(50, 100, 255));  m_currentColor = RGB(50, 100, 255);  UpdateStatusBar(); }
+void CLargeHWView::OnColorMagenta() { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR MAGENTA"); CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(255, 0, 127));   m_currentColor = RGB(255, 0, 127);   UpdateStatusBar(); }
+void CLargeHWView::OnColorWhite()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"COLOR WHITE");   CLargeHWDoc* p = GetDocument(); p->SetCurrentColor(RGB(240, 240, 240)); m_currentColor = RGB(240, 240, 240); UpdateStatusBar(); }
 
-void CLargeHWView::OnLinetypeSolid()   { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_SOLID);   m_currentLineStyle = PS_SOLID;   UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDash()    { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASH);    m_currentLineStyle = PS_DASH;    UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDot()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DOT);     m_currentLineStyle = PS_DOT;     UpdateStatusBar(); }
-void CLargeHWView::OnLinetypeDashDot() { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASHDOT); m_currentLineStyle = PS_DASHDOT; UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeSolid()   { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE SOLID");   CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_SOLID);   m_currentLineStyle = PS_SOLID;   UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDash()    { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DASH");    CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASH);    m_currentLineStyle = PS_DASH;    UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDot()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DOT");     CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DOT);     m_currentLineStyle = PS_DOT;     UpdateStatusBar(); }
+void CLargeHWView::OnLinetypeDashDot() { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINETYPE DASHDOT"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineStyle(PS_DASHDOT); m_currentLineStyle = PS_DASHDOT; UpdateStatusBar(); }
 
-void CLargeHWView::OnLineweight1()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(1); m_currentLineWidth = 1; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight2()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(2); m_currentLineWidth = 2; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight3()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(3); m_currentLineWidth = 3; UpdateStatusBar(); }
-void CLargeHWView::OnLineweight4()     { CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(4); m_currentLineWidth = 4; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight1()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 1"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(1); m_currentLineWidth = 1; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight2()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 2"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(2); m_currentLineWidth = 2; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight3()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 3"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(3); m_currentLineWidth = 3; UpdateStatusBar(); }
+void CLargeHWView::OnLineweight4()     { if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) RecordScriptInput(L"LINEWEIGHT 4"); CLargeHWDoc* p = GetDocument(); p->SetCurrentLineWidth(4); m_currentLineWidth = 4; UpdateStatusBar(); }
 
 void CLargeHWView::OnCancelCommand()
 {
+    if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine)
+        RecordScriptInput(L"ESC");
     m_tempPts.clear();
     m_bCoordDimMode = false;
+    m_pChamferFirst = nullptr;
     CLargeHWDoc* pDoc = GetDocument();
     pDoc->DeselectAll();
     CompleteDrawCommand();
@@ -3331,6 +4716,11 @@ void CLargeHWView::OnFormatLayer()
         if (idx < (int)layers.size()) {
             pDoc->SetCurrentLayer(layers[idx]);
             pDoc->m_strCommandPrompt.Format(L"Current layer: %s", (LPCTSTR)layers[idx]);
+            if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+                CString script;
+                script.Format(L"LAYER SET %s", (LPCTSTR)QuoteScriptToken(layers[idx]));
+                RecordScriptInput(script);
+            }
         }
     } else if (nSel == 10099) {
         CString strName;
@@ -3338,8 +4728,89 @@ void CLargeHWView::OnFormatLayer()
         pDoc->AddLayer(strName);
         pDoc->SetCurrentLayer(strName);
         pDoc->m_strCommandPrompt.Format(L"New layer created: %s", (LPCTSTR)strName);
+        if (m_bScriptRecording && !m_bRunningScript && !m_bSubmittingCommandLine) {
+            CString script;
+            script.Format(L"LAYER MAKE %s", (LPCTSTR)QuoteScriptToken(strName));
+            RecordScriptInput(script);
+        }
     }
     UpdateStatusBar();
+}
+
+// ============================================================
+// SCR script commands
+// ============================================================
+void CLargeHWView::OnScriptRun()
+{
+    CFileDialog dlg(TRUE, L"scr", nullptr,
+                    OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+                    L"SCR Script Files (*.scr)|*.scr|Text Files (*.txt)|*.txt|All Files (*.*)|*.*||",
+                    this);
+    if (dlg.DoModal() != IDOK)
+        return;
+
+    if (!ExecuteScriptFile(dlg.GetPathName())) {
+        AfxMessageBox(L"Failed to read SCR script file.", MB_ICONERROR);
+    }
+}
+
+void CLargeHWView::OnScriptRecordStart()
+{
+    if (m_bScriptRecording)
+        return;
+
+    CFileDialog dlg(FALSE, L"scr", L"recording.scr",
+                    OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY,
+                    L"SCR Script Files (*.scr)|*.scr|Text Files (*.txt)|*.txt|All Files (*.*)|*.*||",
+                    this);
+    if (dlg.DoModal() != IDOK)
+        return;
+
+    CString strPath = dlg.GetPathName();
+    if (!m_scriptRecordFile.Open(strPath,
+                                 CFile::modeCreate | CFile::modeWrite | CFile::shareDenyWrite)) {
+        AfxMessageBox(L"Failed to create SCR script file.", MB_ICONERROR);
+        return;
+    }
+
+    m_strScriptRecordPath = strPath;
+    m_bScriptRecording = true;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc)
+        pDoc->m_strCommandPrompt = L"SCR recording started. Use Script > Stop Recording to finish.";
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+}
+
+void CLargeHWView::OnScriptRecordStop()
+{
+    if (!m_bScriptRecording)
+        return;
+
+    m_scriptRecordFile.Close();
+    m_bScriptRecording = false;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc)
+        pDoc->m_strCommandPrompt.Format(L"SCR recording saved: %s", (LPCTSTR)m_strScriptRecordPath);
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+}
+
+void CLargeHWView::OnUpdateScriptRun(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(!m_bRunningScript);
+}
+
+void CLargeHWView::OnUpdateScriptRecordStart(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(!m_bScriptRecording && !m_bRunningScript);
+}
+
+void CLargeHWView::OnUpdateScriptRecordStop(CCmdUI* pCmdUI)
+{
+    pCmdUI->Enable(m_bScriptRecording);
 }
 
 void CLargeHWView::OnContextRepeat()
@@ -3365,9 +4836,1043 @@ void CLargeHWView::RepeatLastCommand()
     case ID_MODIFY_SCALE:    OnModifyScale(); break;
     case ID_MODIFY_MIRROR:   OnModifyMirror(); break;
     case ID_MODIFY_OFFSET:   OnModifyOffset(); break;
+    case ID_MODIFY_CHAMFER:  OnModifyChamfer(); break;
+    case ID_MODIFY_FILLET:   OnModifyFillet(); break;
+    case ID_MODIFY_ARRAY:    OnModifyArray(); break;
     case ID_VIEW_ZOOM_WINDOW: OnViewZoomWindow(); break;
     default: break;
     }
+}
+
+// ============================================================
+// SCR script helpers
+// ============================================================
+CString CLargeHWView::FormatScriptPoint(CPoint pt) const
+{
+    return FormatModelPoint(pt, GetModelUnitScale(GetDocument()));
+}
+
+CString CLargeHWView::EscapeScriptText(const CString& strText) const
+{
+    CString str = strText;
+    str.Replace(L"\"", L"\\\"");
+    return str;
+}
+
+void CLargeHWView::RecordScriptInput(const CString& strInput)
+{
+    if (!m_bScriptRecording || m_bRunningScript)
+        return;
+
+    CString strLine = strInput;
+    strLine.TrimRight(L"\r\n");
+
+    CStringA utf8 = WideToUtf8(strLine);
+    if (!utf8.IsEmpty())
+        m_scriptRecordFile.Write((LPCSTR)utf8, (UINT)utf8.GetLength());
+    m_scriptRecordFile.Write("\r\n", 2);
+    m_scriptRecordFile.Flush();
+}
+
+bool CLargeHWView::IsCoordinateInput(const CString& strInput) const
+{
+    CString str = strInput;
+    str.Trim();
+    if (str.IsEmpty()) return false;
+
+    if (str.Find(L',') >= 0 || str[0] == L'@' || str.Find(L'<') >= 0)
+        return true;
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc || pDoc->m_drawState == STATE_IDLE)
+        return false;
+
+    wchar_t* pEnd = nullptr;
+    wcstod(str, &pEnd);
+    while (pEnd && *pEnd != L'\0' && iswspace(*pEnd))
+        ++pEnd;
+    return pEnd && *pEnd == L'\0';
+}
+
+void CLargeHWView::SyncCommandLinePrompt()
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    CMainFrame* pFrame = (CMainFrame*)AfxGetMainWnd();
+    if (!pDoc || !pFrame || !pFrame->m_wndCmdLine.GetSafeHwnd())
+        return;
+
+    CString strPrompt = pDoc->m_strCommandPrompt;
+    if (strPrompt.IsEmpty()) strPrompt = L"Command: ";
+    pFrame->m_wndCmdLine.SetWindowText(strPrompt);
+    pFrame->m_wndCmdLine.SetSel(strPrompt.GetLength(), strPrompt.GetLength());
+}
+
+void CLargeHWView::SubmitCommandLineInput(const CString& strInput, bool bRecord)
+{
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return;
+
+    CString strCmd = strInput;
+    strCmd.Trim();
+
+    if (strCmd.IsEmpty()) {
+        if (bRecord) RecordScriptInput(L"");
+        m_bSubmittingCommandLine = true;
+        OnKeyDown(VK_RETURN, 1, 0);
+        m_bSubmittingCommandLine = false;
+    } else {
+        CString strUpper = NormalizeScriptWord(strCmd);
+
+        if (pDoc->m_drawState == STATE_DRAW_LINE_P2 &&
+            (strUpper == L"C" || strUpper == L"CLOSE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            CloseLineCommand();
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+            (strUpper == L"C" || strUpper == L"CLOSE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            FinishPolylineCommand(true);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"A" || strUpper == L"ARC")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            m_bPolylineArcMode = true;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"L" || strUpper == L"LINE")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            m_bPolylineArcMode = false;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
+        } else if (pDoc->m_drawState == STATE_DRAW_POLYLINE_POINT &&
+                   (strUpper == L"W" || strUpper == L"WIDTH")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            SetDrawState(STATE_DRAW_POLYLINE_START_WIDTH);
+        } else if (pDoc->m_drawState == STATE_ARRAY_SELECT &&
+                   (strUpper == L"ALL" || strUpper == L"*")) {
+            if (bRecord) RecordScriptInput(strUpper);
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            UpdateArrayDefaultSpacingFromSelection();
+            SetDrawState(STATE_ARRAY_ROWS);
+        } else if (ProcessArrayParameterInput(strCmd)) {
+            if (bRecord)
+                RecordScriptInput(strCmd);
+        } else if ((pDoc->m_drawState == STATE_ZOOM_WINDOW_P1 ||
+                    pDoc->m_drawState == STATE_ZOOM_WINDOW_P2) &&
+                   (strUpper == L"E" || strUpper == L"EXTENTS")) {
+            if (bRecord) RecordScriptInput(L"ZOOM E");
+            m_bSubmittingCommandLine = true;
+            OnViewZoomExtents();
+            m_bSubmittingCommandLine = false;
+        } else if (IsCoordinateInput(strCmd)) {
+            if (bRecord && pDoc->m_drawState != STATE_DRAW_TEXT_POS)
+                RecordScriptInput(strCmd);
+            m_bSubmittingCommandLine = true;
+            ProcessCoordinateInput(strCmd);
+            m_bSubmittingCommandLine = false;
+        } else if (pDoc->m_drawState != STATE_IDLE) {
+            pDoc->m_strCommandPrompt.Format(L"Invalid option for current command: %s. Press Esc to cancel.", (LPCTSTR)strCmd);
+            UpdateStatusBar();
+        } else {
+            bool bTextStart =
+                (strUpper == L"T" || strUpper == L"TEXT" || strUpper == L"DT" || strUpper == L"DTEXT");
+            bool bScriptControl =
+                (strUpper == L"SCRIPT" || strUpper == L"SCR" ||
+                 strUpper == L"SCRIPTREC" || strUpper == L"RECORDSCRIPT" || strUpper == L"SCRREC" ||
+                 strUpper == L"SCRIPTSTOP" || strUpper == L"STOPSCRIPT" || strUpper == L"SCRSTOP");
+            if (bRecord && !bTextStart && !bScriptControl)
+                RecordScriptInput(strCmd);
+
+            m_bSubmittingCommandLine = true;
+            ExecuteCommand(strCmd);
+            m_bSubmittingCommandLine = false;
+        }
+    }
+
+    if (pDoc->m_drawState == STATE_IDLE)
+        pDoc->m_strCommandPrompt = L"Command: ";
+    SyncCommandLinePrompt();
+}
+
+bool CLargeHWView::ShouldRecordPointForState(CadDrawState state) const
+{
+    switch (state) {
+    case STATE_DRAW_LINE_P1:
+    case STATE_DRAW_LINE_P2:
+    case STATE_DRAW_CIRCLE_CENTER:
+    case STATE_DRAW_CIRCLE_RADIUS:
+    case STATE_DRAW_ARC_P1:
+    case STATE_DRAW_ARC_P2:
+    case STATE_DRAW_ARC_P3:
+    case STATE_DRAW_RECT_P1:
+    case STATE_DRAW_RECT_P2:
+    case STATE_DRAW_POLYGON_CENTER:
+    case STATE_DRAW_POLYGON_RADIUS:
+    case STATE_DRAW_ELLIPSE_CENTER:
+    case STATE_DRAW_ELLIPSE_RADIUS:
+    case STATE_DRAW_POLYLINE_POINT:
+    case STATE_DRAW_POLYLINE_START_WIDTH:
+    case STATE_DRAW_POLYLINE_END_WIDTH:
+    case STATE_MOVE_SELECT:
+    case STATE_MOVE_BASE:
+    case STATE_MOVE_DEST:
+    case STATE_COPY_SELECT:
+    case STATE_COPY_BASE:
+    case STATE_COPY_DEST:
+    case STATE_ROTATE_SELECT:
+    case STATE_ROTATE_CENTER:
+    case STATE_ROTATE_ANGLE:
+    case STATE_SCALE_SELECT:
+    case STATE_SCALE_BASE:
+    case STATE_SCALE_FACTOR:
+    case STATE_MIRROR_SELECT:
+    case STATE_MIRROR_P1:
+    case STATE_MIRROR_P2:
+    case STATE_OFFSET_SELECT:
+    case STATE_OFFSET_DIST:
+    case STATE_CHAMFER_SELECT_FIRST:
+    case STATE_CHAMFER_SELECT_SECOND:
+    case STATE_FILLET_SELECT_FIRST:
+    case STATE_FILLET_SELECT_SECOND:
+    case STATE_ARRAY_SELECT:
+    case STATE_ZOOM_WINDOW_P1:
+    case STATE_ZOOM_WINDOW_P2:
+        return true;
+    default:
+        return false;
+    }
+}
+
+CString CLargeHWView::StripScriptComment(const CString& strLine) const
+{
+    bool bInQuote = false;
+    for (int i = 0; i < strLine.GetLength(); ++i) {
+        wchar_t ch = strLine[i];
+        if (ch == L'"') {
+            bInQuote = !bInQuote;
+        } else if (!bInQuote && (ch == L';' || ch == L'#')) {
+            return strLine.Left(i);
+        }
+    }
+    return strLine;
+}
+
+void CLargeHWView::TokenizeScriptLine(const CString& strLine, std::vector<CString>& tokens) const
+{
+    tokens.clear();
+    CString token;
+    bool bInQuote = false;
+
+    for (int i = 0; i < strLine.GetLength(); ++i) {
+        wchar_t ch = strLine[i];
+        if (bInQuote && ch == L'\\' && i + 1 < strLine.GetLength() && strLine[i + 1] == L'"') {
+            token += L'"';
+            ++i;
+        } else if (ch == L'"') {
+            bInQuote = !bInQuote;
+        } else if (!bInQuote && iswspace(ch)) {
+            if (!token.IsEmpty()) {
+                tokens.push_back(token);
+                token.Empty();
+            }
+        } else {
+            token += ch;
+        }
+    }
+
+    if (!token.IsEmpty())
+        tokens.push_back(token);
+}
+
+bool CLargeHWView::ExecuteDirectScriptCommand(const CString& strLine)
+{
+    std::vector<CString> tokens;
+    TokenizeScriptLine(strLine, tokens);
+    if (tokens.empty())
+        return true;
+
+    CString cmd = NormalizeScriptWord(tokens[0]);
+
+    CLargeHWDoc* pDoc = GetDocument();
+    if (!pDoc) return true;
+
+    const double coordScale = max(max(1.0, m_dScriptCoordinateScale), GetModelUnitScale(pDoc));
+    auto parsePoint = [coordScale](const CString& token, CPoint ref, CPoint& pt) {
+        return TryParseScriptPoint(token, ref, pt, coordScale);
+    };
+    auto scaleLength = [coordScale](double value) {
+        return ScriptRound(value * coordScale);
+    };
+
+    if ((cmd == L"LINE" || cmd == L"L") && tokens.size() >= 3) {
+        std::vector<CPoint> points;
+        bool bClosed = false;
+        CPoint ref(0, 0);
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            CString option = NormalizeScriptWord(tokens[i]);
+            if (option == L"C" || option == L"CLOSE") {
+                bClosed = true;
+                continue;
+            }
+
+            CPoint pt;
+            if (!parsePoint(tokens[i], ref, pt))
+                return false;
+            points.push_back(pt);
+            ref = pt;
+        }
+
+        if (points.size() < 2)
+            return false;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        for (size_t i = 1; i < points.size(); ++i)
+            pDoc->AddEntity(new CLineEntity(points[i - 1], points[i]));
+        if (bClosed && points.size() > 2)
+            pDoc->AddEntity(new CLineEntity(points.back(), points.front()));
+
+        pDoc->m_strCommandPrompt.Format(L"Script LINE added: %d segment(s)",
+                                        (int)points.size() - 1 + (bClosed && points.size() > 2 ? 1 : 0));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"CIRCLE" || cmd == L"C") && tokens.size() >= 3) {
+        CPoint center;
+        if (!parsePoint(tokens[1], CPoint(0, 0), center))
+            return false;
+
+        int radius = 0;
+        double radiusValue = 0.0;
+        if (TryParseDoubleStrict(tokens[2], radiusValue)) {
+            radius = abs(scaleLength(radiusValue));
+        } else {
+            CPoint radiusPoint;
+            if (!parsePoint(tokens[2], center, radiusPoint))
+                return false;
+            radius = ScriptRound(Distance(center, radiusPoint));
+        }
+        if (radius < 1)
+            radius = 1;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CCircleEntity(center, radius));
+        pDoc->m_strCommandPrompt.Format(L"Script CIRCLE added: center %s radius %s",
+                                        (LPCTSTR)FormatModelPoint(center, GetModelUnitScale(pDoc)),
+                                        (LPCTSTR)FormatModelNumber(radius / GetModelUnitScale(pDoc)));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"RECTANGLE" || cmd == L"RECTANG" || cmd == L"RECT" || cmd == L"REC" || cmd == L"BOX") &&
+        tokens.size() >= 3) {
+        CPoint p1;
+        CPoint p2;
+        if (!parsePoint(tokens[1], CPoint(0, 0), p1) ||
+            !parsePoint(tokens[2], p1, p2)) {
+            return false;
+        }
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CRectangleEntity(p1, p2));
+        pDoc->m_strCommandPrompt = (cmd == L"BOX") ? L"Script BOX projected to 2D RECTANGLE"
+                                                    : L"Script RECTANGLE added";
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"POINT" || cmd == L"PO") && tokens.size() >= 2) {
+        CPoint pos;
+        if (!parsePoint(tokens[1], CPoint(0, 0), pos))
+            return false;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CPointEntity(pos));
+        pDoc->m_strCommandPrompt.Format(L"Script POINT added: %s",
+                                        (LPCTSTR)FormatModelPoint(pos, GetModelUnitScale(pDoc)));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"ELLIPSE" || cmd == L"EL") && tokens.size() >= 3) {
+        CPoint center;
+        if (!parsePoint(tokens[1], CPoint(0, 0), center))
+            return false;
+
+        int rx = 0;
+        int ry = 0;
+        double rxValue = 0.0;
+        double ryValue = 0.0;
+
+        if (tokens.size() >= 4 &&
+            TryParseDoubleStrict(tokens[2], rxValue) &&
+            TryParseDoubleStrict(tokens[3], ryValue)) {
+            rx = abs(scaleLength(rxValue));
+            ry = abs(scaleLength(ryValue));
+        } else {
+            CPoint radiusPoint;
+            if (!parsePoint(tokens[2], center, radiusPoint))
+                return false;
+            rx = abs(radiusPoint.x - center.x);
+            ry = abs(radiusPoint.y - center.y);
+        }
+
+        if (rx < 1) rx = 1;
+        if (ry < 1) ry = 1;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CEllipseEntity(center, rx, ry));
+        pDoc->m_strCommandPrompt.Format(L"Script ELLIPSE added: rx=%s ry=%s",
+                                        (LPCTSTR)FormatModelNumber(rx / GetModelUnitScale(pDoc)),
+                                        (LPCTSTR)FormatModelNumber(ry / GetModelUnitScale(pDoc)));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"POLYGON" || cmd == L"POL") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        int nSides = 6;
+        double sideValue = 0.0;
+        if (tokens.size() >= 4 && TryParseDoubleStrict(tokens[1], sideValue)) {
+            nSides = max(3, min(12, abs(ScriptRound(sideValue))));
+            nIndex = 2;
+        }
+
+        CPoint center;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), center))
+            return false;
+
+        int radius = 0;
+        double radiusValue = 0.0;
+        if (TryParseDoubleStrict(tokens[nIndex + 1], radiusValue)) {
+            radius = abs(scaleLength(radiusValue));
+        } else {
+            CPoint radiusPoint;
+            if (!parsePoint(tokens[nIndex + 1], center, radiusPoint))
+                return false;
+            radius = ScriptRound(Distance(center, radiusPoint));
+        }
+        if (radius < 1)
+            radius = 1;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CPolygonEntity(center, radius, nSides));
+        pDoc->m_strCommandPrompt.Format(L"Script POLYGON added: %d sides", nSides);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"ARC" || cmd == L"A") && tokens.size() >= 4) {
+        if (NormalizeScriptWord(tokens[1]) == L"C") {
+            if (tokens.size() < 5)
+                return false;
+
+            CPoint center;
+            CPoint start;
+            CPoint end;
+            if (!parsePoint(tokens[2], CPoint(0, 0), center) ||
+                !parsePoint(tokens[3], center, start) ||
+                !parsePoint(tokens[4], start, end)) {
+                return false;
+            }
+
+            int radius = ScriptRound(Distance(center, start));
+            if (radius < 1)
+                return false;
+
+            double angStart = atan2((double)(start.y - center.y), (double)(start.x - center.x));
+            double angEnd = atan2((double)(end.y - center.y), (double)(end.x - center.x));
+
+            if (pDoc->m_drawState != STATE_IDLE)
+                OnCancelCommand();
+
+            CArcEntity* pArc = new CArcEntity();
+            pArc->SetArcByCenter(center, radius, angStart, angEnd);
+            pDoc->AddEntity(pArc);
+            pDoc->m_strCommandPrompt = L"Script ARC added";
+            UpdateStatusBar();
+            Invalidate(FALSE);
+            return true;
+        }
+
+        CPoint start;
+        CPoint mid;
+        CPoint end;
+        if (!parsePoint(tokens[1], CPoint(0, 0), start) ||
+            !parsePoint(tokens[2], start, mid) ||
+            !parsePoint(tokens[3], mid, end)) {
+            return false;
+        }
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        pDoc->AddEntity(new CArcEntity(start, mid, end));
+        pDoc->m_strCommandPrompt = L"Script ARC added";
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"PLINE" || cmd == L"POLYLINE" || cmd == L"PL") && tokens.size() >= 3) {
+        std::vector<CPoint> points;
+        bool bClosed = false;
+        CPoint ref(0, 0);
+
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            CString option = NormalizeScriptWord(tokens[i]);
+            if (option == L"C" || option == L"CLOSE") {
+                bClosed = true;
+                continue;
+            }
+
+            CPoint pt;
+            if (!parsePoint(tokens[i], ref, pt))
+                return false;
+            points.push_back(pt);
+            ref = pt;
+        }
+
+        if (points.size() < 2)
+            return false;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        CPolylineEntity* pPolyline = new CPolylineEntity(points);
+        pPolyline->m_bClosed = bClosed;
+        pDoc->AddEntity(pPolyline);
+        pDoc->m_strCommandPrompt.Format(L"Script PLINE added: %d vertices", (int)points.size());
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if (cmd == L"TEXT" || cmd == L"T" || cmd == L"DT" || cmd == L"DTEXT") {
+        if (tokens.size() < 4)
+            return false;
+
+        if (pDoc->m_drawState != STATE_IDLE)
+            OnCancelCommand();
+
+        CPoint pos;
+        if (!parsePoint(tokens[1], CPoint(0, 0), pos))
+            return false;
+
+        double height = 0.0;
+        int nHeight = TryParseDoubleStrict(tokens[2], height) ? abs(scaleLength(height)) : _wtoi(tokens[2]);
+        if (nHeight < 1) nHeight = 20;
+
+        CString strText = tokens[3];
+        for (size_t i = 4; i < tokens.size(); ++i) {
+            strText += L" ";
+            strText += tokens[i];
+        }
+
+        CTextEntity* pText = new CTextEntity(pos, strText, nHeight);
+        pDoc->AddEntity(pText);
+        pDoc->m_strCommandPrompt.Format(L"Script TEXT added: %s", (LPCTSTR)strText);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"LAYER" || cmd == L"LA" || cmd == L"CLAYER") && tokens.size() >= 2) {
+        size_t nameIndex = 1;
+        CString action = L"MAKE";
+
+        if (cmd != L"CLAYER") {
+            CString maybeAction = NormalizeScriptWord(tokens[1]);
+            if (maybeAction == L"SET" || maybeAction == L"S" ||
+                maybeAction == L"MAKE" || maybeAction == L"M" ||
+                maybeAction == L"NEW" || maybeAction == L"N") {
+                action = maybeAction;
+                nameIndex = 2;
+            }
+        } else {
+            action = L"SET";
+        }
+
+        if (nameIndex >= tokens.size())
+            return false;
+
+        CString layerName = tokens[nameIndex];
+        layerName.Trim();
+        if (layerName.IsEmpty())
+            return false;
+
+        pDoc->AddLayer(layerName);
+        if (action != L"NEW" && action != L"N")
+            pDoc->SetCurrentLayer(layerName);
+
+        pDoc->m_strCommandPrompt.Format(
+            (action == L"NEW" || action == L"N") ? L"Script LAYER new: %s" : L"Script LAYER current: %s",
+            (LPCTSTR)layerName);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if (cmd == L"SELECT" && tokens.size() >= 2 && IsAllSelectionToken(tokens[1])) {
+        pDoc->DeselectAll();
+        SelectAllEntities(pDoc);
+        pDoc->m_strCommandPrompt.Format(L"Script SELECT ALL: %d selected", pDoc->GetSelectedCount());
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"ERASE" || cmd == L"DELETE" || cmd == L"DEL" || cmd == L"E") &&
+        tokens.size() >= 2 && IsAllSelectionToken(tokens[1])) {
+        pDoc->DeselectAll();
+        SelectAllEntities(pDoc);
+        int nCount = pDoc->GetSelectedCount();
+        pDoc->DeleteSelected();
+        pDoc->m_strCommandPrompt.Format(L"Script ERASE ALL: %d entities", nCount);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"MOVE" || cmd == L"M") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint base;
+        CPoint dest;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), base) ||
+            !parsePoint(tokens[nIndex + 1], base, dest)) {
+            return false;
+        }
+
+        pDoc->RecordModifyUndo();
+        int nCount = pDoc->GetSelectedCount();
+        pDoc->MoveSelected(dest.x - base.x, dest.y - base.y);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script MOVE: %d entities", nCount);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"COPY" || cmd == L"CO" || cmd == L"CP") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint base;
+        CPoint dest;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), base) ||
+            !parsePoint(tokens[nIndex + 1], base, dest)) {
+            return false;
+        }
+
+        double dx = dest.x - base.x;
+        double dy = dest.y - base.y;
+        auto selectedEnts = pDoc->GetSelectedEntities();
+        std::vector<int> newIDs;
+        for (auto* pEnt : selectedEnts) {
+            CEntity* pCopy = pEnt->Clone();
+            if (!pCopy) continue;
+            pCopy->Move(dx, dy);
+            pDoc->AddEntity(pCopy, false);
+            newIDs.push_back(pCopy->m_nID);
+        }
+        pDoc->RecordCreateUndo(newIDs);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script COPY: %d entities", (int)newIDs.size());
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"ROTATE" || cmd == L"RO") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint base;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), base))
+            return false;
+
+        double angleDeg = 0.0;
+        if (!TryParseDoubleStrict(tokens[nIndex + 1], angleDeg)) {
+            CPoint anglePoint;
+            if (!parsePoint(tokens[nIndex + 1], base, anglePoint))
+                return false;
+            angleDeg = atan2((double)(anglePoint.y - base.y), (double)(anglePoint.x - base.x)) * 180.0 / M_PI;
+        }
+
+        pDoc->RecordModifyUndo();
+        int nCount = pDoc->GetSelectedCount();
+        pDoc->RotateSelected(base, angleDeg * M_PI / 180.0);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script ROTATE: %d entities", nCount);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"SCALE" || cmd == L"SC") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint base;
+        double factor = 0.0;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), base) ||
+            !TryParseDoubleStrict(tokens[nIndex + 1], factor)) {
+            return false;
+        }
+        if (fabs(factor) < 1e-9)
+            return false;
+
+        pDoc->RecordModifyUndo();
+        int nCount = pDoc->GetSelectedCount();
+        pDoc->ScaleSelected(base, factor);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script SCALE: %d entities", nCount);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"MIRROR" || cmd == L"MI") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint p1;
+        CPoint p2;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), p1) ||
+            !parsePoint(tokens[nIndex + 1], p1, p2) ||
+            Distance(p1, p2) < 1.0) {
+            return false;
+        }
+
+        pDoc->RecordModifyUndo();
+        int nCount = pDoc->GetSelectedCount();
+        pDoc->MirrorSelected(p1, p2);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script MIRROR: %d entities", nCount);
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"OFFSET" || cmd == L"O") && tokens.size() >= 3) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 2 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        CPoint base;
+        CPoint dest;
+        if (!parsePoint(tokens[nIndex], CPoint(0, 0), base) ||
+            !parsePoint(tokens[nIndex + 1], base, dest)) {
+            return false;
+        }
+
+        double dx = dest.x - base.x;
+        double dy = dest.y - base.y;
+        auto selectedEnts = pDoc->GetSelectedEntities();
+        std::vector<int> newIDs;
+        for (auto* pEnt : selectedEnts) {
+            CEntity* pCopy = pEnt->Clone();
+            if (!pCopy) continue;
+            pCopy->Move(dx, dy);
+            pDoc->AddEntity(pCopy, false);
+            newIDs.push_back(pCopy->m_nID);
+        }
+        pDoc->RecordCreateUndo(newIDs);
+        pDoc->DeselectAll();
+        pDoc->m_strCommandPrompt.Format(L"Script OFFSET: %d entities", (int)newIDs.size());
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"ARRAY" || cmd == L"ARRAYRECT" || cmd == L"AR") && tokens.size() >= 5) {
+        size_t nIndex = 1;
+        if (IsAllSelectionToken(tokens[nIndex])) {
+            pDoc->DeselectAll();
+            SelectAllEntities(pDoc);
+            ++nIndex;
+        }
+        if (tokens.size() < nIndex + 4 || pDoc->GetSelectedCount() == 0)
+            return false;
+
+        double rowsValue = 0.0;
+        double colsValue = 0.0;
+        double rowSpacingValue = 0.0;
+        double colSpacingValue = 0.0;
+        if (!TryParseDoubleStrict(tokens[nIndex], rowsValue) ||
+            !TryParseDoubleStrict(tokens[nIndex + 1], colsValue) ||
+            !TryParseDoubleStrict(tokens[nIndex + 2], rowSpacingValue) ||
+            !TryParseDoubleStrict(tokens[nIndex + 3], colSpacingValue)) {
+            return false;
+        }
+
+        CreateRectangularArray(max(1, abs((int)rowsValue)),
+                               max(1, abs((int)colsValue)),
+                               scaleLength(rowSpacingValue),
+                               scaleLength(colSpacingValue));
+        return true;
+    }
+
+    if ((cmd == L"CHAMFER" || cmd == L"CHA") && tokens.size() >= 2) {
+        double distanceValue = 0.0;
+        if (!TryParseDoubleStrict(tokens[1], distanceValue))
+            return false;
+
+        std::vector<CLineEntity*> selectedLines;
+        for (auto* pEnt : pDoc->GetSelectedEntities()) {
+            if (pEnt && pEnt->m_Type == ENT_LINE)
+                selectedLines.push_back(static_cast<CLineEntity*>(pEnt));
+        }
+        if (selectedLines.size() < 2)
+            return false;
+
+        ApplyChamfer(selectedLines[0], selectedLines[1], fabs(scaleLength(distanceValue)));
+        return true;
+    }
+
+    if (cmd == L"UNDO" || cmd == L"U") {
+        OnEditUndo();
+        return true;
+    }
+
+    if (cmd == L"REDO") {
+        OnEditRedo();
+        return true;
+    }
+
+    if (cmd == L"ZOOME" ||
+        (cmd == L"ZOOM" && tokens.size() >= 2 &&
+         (NormalizeScriptWord(tokens[1]) == L"E" || NormalizeScriptWord(tokens[1]) == L"EXTENTS"))) {
+        OnViewZoomExtents();
+        return true;
+    }
+
+    if ((cmd == L"GRID" || cmd == L"SNAP" || cmd == L"ORTHO" || cmd == L"OSNAP" || cmd == L"F7" ||
+         cmd == L"F8" || cmd == L"F9" || cmd == L"F3") && tokens.size() >= 1) {
+        bool* pFlag = nullptr;
+        if (cmd == L"GRID" || cmd == L"F7") pFlag = &pDoc->m_bShowGrid;
+        else if (cmd == L"SNAP" || cmd == L"F9") pFlag = &pDoc->m_bSnapToGrid;
+        else if (cmd == L"ORTHO" || cmd == L"F8") pFlag = &pDoc->m_bOrthoMode;
+        else if (cmd == L"OSNAP" || cmd == L"F3") pFlag = &pDoc->m_bObjectSnap;
+
+        if (!pFlag)
+            return false;
+
+        if (tokens.size() >= 2) {
+            bool flagValue = false;
+            double numericValue = 0.0;
+            if (TryParseOnOff(tokens[1], flagValue)) {
+                *pFlag = flagValue;
+            } else if ((cmd == L"GRID" || cmd == L"SNAP") &&
+                       TryParseDoubleStrict(tokens[1], numericValue)) {
+                pDoc->m_nGridSpacing = max(1, abs(scaleLength(numericValue)));
+                *pFlag = true;
+            } else {
+                return false;
+            }
+        } else {
+            *pFlag = !*pFlag;
+        }
+
+        pDoc->m_strCommandPrompt.Format(L"Script %s %s", (LPCTSTR)cmd, (LPCTSTR)FormatOnOff(*pFlag));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if ((cmd == L"GRIDSPACING" || cmd == L"GRIDUNIT") && tokens.size() >= 2) {
+        double spacing = 0.0;
+        if (!TryParseDoubleStrict(tokens[1], spacing))
+            return false;
+
+        pDoc->m_nGridSpacing = max(1, abs(scaleLength(spacing)));
+        pDoc->m_strCommandPrompt.Format(L"Script GRIDSPACING %s",
+                                        (LPCTSTR)FormatModelNumber(pDoc->m_nGridSpacing / GetModelUnitScale(pDoc)));
+        UpdateStatusBar();
+        Invalidate(FALSE);
+        return true;
+    }
+
+    if (cmd == L"COLOR" && tokens.size() >= 2) {
+        CString arg = NormalizeScriptWord(tokens[1]);
+
+        if (arg == L"RED") OnColorRed();
+        else if (arg == L"YELLOW") OnColorYellow();
+        else if (arg == L"GREEN") OnColorGreen();
+        else if (arg == L"CYAN") OnColorCyan();
+        else if (arg == L"BLUE") OnColorBlue();
+        else if (arg == L"MAGENTA") OnColorMagenta();
+        else if (arg == L"WHITE") OnColorWhite();
+        else if (arg.Find(L',') > 0) {
+            int nFirst = arg.Find(L',');
+            int nSecond = arg.Find(L",", nFirst + 1);
+            if (nSecond > nFirst) {
+                int r = max(0, min(255, _wtoi(arg.Left(nFirst))));
+                int g = max(0, min(255, _wtoi(arg.Mid(nFirst + 1, nSecond - nFirst - 1))));
+                int b = max(0, min(255, _wtoi(arg.Mid(nSecond + 1))));
+                pDoc->SetCurrentColor(RGB(r, g, b));
+                m_currentColor = RGB(r, g, b);
+                UpdateStatusBar();
+            }
+        }
+        return true;
+    }
+
+    if ((cmd == L"LINETYPE" || cmd == L"LTYPE") && tokens.size() >= 2) {
+        CString arg = NormalizeScriptWord(tokens[1]);
+        if (arg == L"SOLID") OnLinetypeSolid();
+        else if (arg == L"DASH") OnLinetypeDash();
+        else if (arg == L"DOT") OnLinetypeDot();
+        else if (arg == L"DASHDOT") OnLinetypeDashDot();
+        return true;
+    }
+
+    if ((cmd == L"LINEWEIGHT" || cmd == L"LWEIGHT") && tokens.size() >= 2) {
+        double width = 0.0;
+        int nWidth = TryParseDoubleStrict(tokens[1], width) ? abs(ScriptRound(width)) : _wtoi(tokens[1]);
+        if (nWidth <= 1) OnLineweight1();
+        else if (nWidth == 2) OnLineweight2();
+        else if (nWidth == 3) OnLineweight3();
+        else OnLineweight4();
+        return true;
+    }
+
+    return false;
+}
+
+void CLargeHWView::ExecuteScriptLine(const CString& strLine)
+{
+    CString line = strLine;
+    line.TrimRight(L"\r\n");
+
+    CString trimmed = line;
+    trimmed.Trim();
+    if (trimmed.IsEmpty()) {
+        SubmitCommandLineInput(L"", false);
+        return;
+    }
+
+    CString withoutComment = StripScriptComment(line);
+    withoutComment.Trim();
+    if (withoutComment.IsEmpty())
+        return;
+
+    if (ExecuteDirectScriptCommand(withoutComment))
+        return;
+
+    std::vector<CString> tokens;
+    TokenizeScriptLine(withoutComment, tokens);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        CString token = (i == 0) ? NormalizeScriptWord(tokens[i]) : tokens[i];
+        SubmitCommandLineInput(token, false);
+    }
+}
+
+bool CLargeHWView::ExecuteScriptFile(const CString& strPath)
+{
+    CString strContent;
+    if (!LoadTextFile(strPath, strContent))
+        return false;
+
+    bool bPrevRunning = m_bRunningScript;
+    double dPrevScriptCoordinateScale = m_dScriptCoordinateScale;
+    CLargeHWDoc* pDoc = GetDocument();
+    if (pDoc)
+        ApplyDocumentModelUnitScale(pDoc, DetermineScriptCoordinateScale(strContent));
+    m_bRunningScript = true;
+    m_dScriptCoordinateScale = pDoc ? GetModelUnitScale(pDoc) : DetermineScriptCoordinateScale(strContent);
+
+    int nLineCount = 0;
+    int nStart = 0;
+    while (nStart <= strContent.GetLength()) {
+        int nEnd = nStart;
+        while (nEnd < strContent.GetLength() &&
+               strContent[nEnd] != L'\r' &&
+               strContent[nEnd] != L'\n') {
+            ++nEnd;
+        }
+
+        CString strLine = strContent.Mid(nStart, nEnd - nStart);
+        ExecuteScriptLine(strLine);
+        ++nLineCount;
+
+        if (nEnd >= strContent.GetLength())
+            break;
+
+        nStart = nEnd + 1;
+        if (strContent[nEnd] == L'\r' &&
+            nStart < strContent.GetLength() &&
+            strContent[nStart] == L'\n') {
+            ++nStart;
+        }
+    }
+
+    m_bRunningScript = bPrevRunning;
+    m_dScriptCoordinateScale = dPrevScriptCoordinateScale;
+
+    if (pDoc) {
+        if (pDoc->m_drawState == STATE_IDLE)
+            pDoc->m_strCommandPrompt.Format(L"Script loaded: %d lines", nLineCount);
+        else
+            pDoc->m_strCommandPrompt.Format(L"Script paused: command needs more input after %d lines", nLineCount);
+    }
+    SyncCommandLinePrompt();
+    UpdateStatusBar();
+    Invalidate(FALSE);
+    return true;
 }
 
 // ============================================================
@@ -3383,36 +5888,27 @@ CPoint CLargeHWView::ParseCoordinate(const CString& str, CPoint ref) const
 
     if (s.IsEmpty()) return ref;
 
+    CPoint pt;
+    double modelUnitScale = GetModelUnitScale(GetDocument());
+    if (TryParseScriptPoint(s, ref, pt, modelUnitScale))
+        return pt;
+
     bool bRelative = false;
-    if (s[0] == L'@') {
+    CString numeric = s;
+    if (!numeric.IsEmpty() && numeric[0] == L'@') {
         bRelative = true;
-        s = s.Mid(1);
-        s.Trim();
+        numeric = numeric.Mid(1);
+        numeric.Trim();
     }
 
-    // Polar: dist<angle
-    int nLt = s.Find(L'<');
-    if (nLt > 0) {
-        double dist = _wtof(s.Left(nLt));
-        double angleDeg = _wtof(s.Mid(nLt + 1));
-        double angleRad = angleDeg * M_PI / 180.0;
-        return CPoint(ref.x + (int)(dist * cos(angleRad)),
-                      ref.y + (int)(dist * sin(angleRad)));
+    double val = 0.0;
+    if (TryParseDoubleStrict(numeric, val)) {
+        int nVal = ScriptRound(val * modelUnitScale);
+        if (bRelative) return CPoint(ref.x + nVal, ref.y);
+        return CPoint(nVal, ref.y);
     }
 
-    // Cartesian: x,y
-    int nComma = s.Find(L',');
-    if (nComma > 0) {
-        int x = _wtoi(s.Left(nComma));
-        int y = _wtoi(s.Mid(nComma + 1));
-        if (bRelative) return CPoint(ref.x + x, ref.y + y);
-        return CPoint(x, y);
-    }
-
-    // Single number: treat as x-coordinate with y=0, or distance if relative
-    int val = _wtoi(s);
-    if (bRelative) return CPoint(ref.x + val, ref.y);
-    return CPoint(val, ref.y);
+    return ref;
 }
 
 // ============================================================
@@ -3426,13 +5922,18 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
     CadDrawState state = pDoc->m_drawState;
 
     // Single-number input for distance/angle states
-    if (strInput.Find(L',') < 0 && strInput[0] != L'@' && strInput.Find(L'<') < 0) {
-        int val = _wtoi(strInput);
+    if (!strInput.IsEmpty() && strInput.Find(L',') < 0 && strInput[0] != L'@' && strInput.Find(L'<') < 0) {
+        double modelUnitScale = GetModelUnitScale(pDoc);
+        double inputValue = 0.0;
+        bool bHasNumericValue = TryParseDoubleStrict(strInput, inputValue);
+        int distanceVal = bHasNumericValue ? ScriptRound(inputValue * modelUnitScale) : _wtoi(strInput);
+        double angleVal = bHasNumericValue ? inputValue : (double)_wtoi(strInput);
+        double factorVal = bHasNumericValue ? inputValue : (double)_wtoi(strInput);
 
         switch (state) {
         case STATE_DRAW_CIRCLE_RADIUS:
             if (!m_tempPts.empty()) {
-                int r = abs(val);
+                int r = abs(distanceVal);
                 CCircleEntity* pCir = new CCircleEntity(m_tempPts[0], r);
                 pDoc->AddEntity(pCir);
                 CompleteDrawCommand();
@@ -3441,7 +5942,7 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
 
         case STATE_DRAW_POLYGON_RADIUS:
             if (!m_tempPts.empty()) {
-                int r = abs(val);
+                int r = abs(distanceVal);
                 CPolygonEntity* pPoly = new CPolygonEntity(m_tempPts[0], r, m_nPolygonSides);
                 pDoc->AddEntity(pPoly);
                 CompleteDrawCommand();
@@ -3450,7 +5951,7 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
 
         case STATE_DRAW_ELLIPSE_RADIUS:
             if (!m_tempPts.empty()) {
-                int r = abs(val);
+                int r = abs(distanceVal);
                 CEllipseEntity* pEll = new CEllipseEntity(m_tempPts[0], r, r);
                 pDoc->AddEntity(pEll);
                 CompleteDrawCommand();
@@ -3459,12 +5960,12 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
 
         case STATE_ROTATE_ANGLE:
             if (!m_tempPts.empty()) {
-                double angle = val * M_PI / 180.0;
+                double angle = angleVal * M_PI / 180.0;
                 int nCount = pDoc->GetSelectedCount();
                 if (nCount > 0) {
                     pDoc->RecordModifyUndo();
                     pDoc->RotateSelected(m_tempPts.back(), angle);
-                    pDoc->m_strCommandPrompt.Format(L"Rotated %d entities (angle=%.1f deg)", nCount, (double)val);
+                    pDoc->m_strCommandPrompt.Format(L"Rotated %d entities (angle=%.1f deg)", nCount, angleVal);
                 }
                 CompleteDrawCommand();
             }
@@ -3472,7 +5973,7 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
 
         case STATE_SCALE_FACTOR:
             if (!m_tempPts.empty()) {
-                double factor = (double)val;
+                double factor = factorVal;
                 if (factor == 0) factor = 1.0;
                 int nCount = pDoc->GetSelectedCount();
                 if (nCount > 0) {
@@ -3483,10 +5984,52 @@ void CLargeHWView::ProcessCoordinateInput(const CString& strInput)
                 CompleteDrawCommand();
             }
             return;
+
+        case STATE_CHAMFER_SELECT_FIRST:
+            m_dChamferDistance = max(0.0, fabs(inputValue * modelUnitScale));
+            SetDrawState(STATE_CHAMFER_SELECT_FIRST);
+            return;
+
+        case STATE_DRAW_POLYLINE_START_WIDTH:
+            m_nPolylineStartWidth = max(1, abs(distanceVal));
+            SetDrawState(STATE_DRAW_POLYLINE_END_WIDTH);
+            return;
+
+        case STATE_DRAW_POLYLINE_END_WIDTH:
+            m_nPolylineEndWidth = max(1, abs(distanceVal));
+            m_nPolylineWidth = m_nPolylineEndWidth;
+            SetDrawState(STATE_DRAW_POLYLINE_POINT);
+            return;
+
+        case STATE_FILLET_SELECT_FIRST:
+            m_dFilletRadius = max(0.0, fabs(inputValue * modelUnitScale));
+            SetDrawState(STATE_FILLET_SELECT_FIRST);
+            return;
+
+        case STATE_ARRAY_ROWS:
+            m_nArrayRows = max(1, abs((int)factorVal));
+            SetDrawState(STATE_ARRAY_COLUMNS);
+            return;
+
+        case STATE_ARRAY_COLUMNS:
+            m_nArrayColumns = max(1, abs((int)factorVal));
+            SetDrawState(STATE_ARRAY_ROW_SPACING);
+            return;
+
+        case STATE_ARRAY_ROW_SPACING:
+            m_dArrayRowSpacing = inputValue * modelUnitScale;
+            SetDrawState(STATE_ARRAY_COLUMN_SPACING);
+            return;
+
+        case STATE_ARRAY_COLUMN_SPACING:
+            m_dArrayColumnSpacing = inputValue * modelUnitScale;
+            CreateRectangularArray(m_nArrayRows, m_nArrayColumns,
+                                   m_dArrayRowSpacing, m_dArrayColumnSpacing);
+            return;
         }
     }
 
-    // Coordinate input (comma / @ / polar) - convert world → screen → click
+    // Coordinate input (comma / @ / polar) - convert world -> screen -> click
     CPoint refPt(0, 0);
     if (!m_tempPts.empty()) refPt = m_tempPts.back();
 
@@ -3509,9 +6052,7 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
 {
     if (strCmd.IsEmpty()) return;
 
-    CString cmd = strCmd;
-    cmd.MakeUpper();
-    cmd.Trim();
+    CString cmd = NormalizeScriptWord(strCmd);
 
     // Cancel current command first if in progress
     CLargeHWDoc* pDoc = GetDocument();
@@ -3569,6 +6110,12 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
         OnModifyMirror();
     } else if (cmd == L"O" || cmd == L"OFFSET") {
         OnModifyOffset();
+    } else if (cmd == L"CHA" || cmd == L"CHAMFER") {
+        OnModifyChamfer();
+    } else if (cmd == L"F" || cmd == L"FILLET") {
+        OnModifyFillet();
+    } else if (cmd == L"AR" || cmd == L"ARRAY" || cmd == L"ARRAYRECT") {
+        OnModifyArray();
     } else if (cmd == L"E" || cmd == L"ERASE" || cmd == L"DEL" || cmd == L"DELETE") {
         OnModifyDelete();
 
@@ -3585,6 +6132,14 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
         OnEditUndo();
     } else if (cmd == L"REDO") {
         OnEditRedo();
+
+    // --- Scripts ---
+    } else if (cmd == L"SCRIPT" || cmd == L"SCR") {
+        OnScriptRun();
+    } else if (cmd == L"SCRIPTREC" || cmd == L"RECORDSCRIPT" || cmd == L"SCRREC") {
+        OnScriptRecordStart();
+    } else if (cmd == L"SCRIPTSTOP" || cmd == L"STOPSCRIPT" || cmd == L"SCRSTOP") {
+        OnScriptRecordStop();
 
     // --- Toggles ---
     } else if (cmd == L"GRID" || cmd == L"F7") {
@@ -3603,6 +6158,9 @@ void CLargeHWView::ExecuteCommand(const CString& strCmd)
         pDoc->m_bObjectSnap = !pDoc->m_bObjectSnap;
         UpdateStatusBar();
         Invalidate(FALSE);
+
+    } else if (ExecuteDirectScriptCommand(strCmd)) {
+        return;
 
     // --- Unknown command ---
     } else {
@@ -3655,7 +6213,7 @@ void CLargeHWView::OnBeginPrinting(CDC* pDC, CPrintInfo* pInfo)
 
     CPoint printOffset(
         (int)(-bounds.left * printScale),
-        (int)(-bounds.top * printScale)
+        (int)(bounds.bottom * printScale)
     );
 
     double saveScale = pDoc->m_dScale;
